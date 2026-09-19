@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>调用监控 · LLM Key Hub</title>
+<style>
+  :root{
+    --bg:#F4F6FB; --card:#FFFFFF; --border:#E3E8F2; --text:#121722; --sub:#6D778C;
+    --primary:#2F5DDF; --primary-soft:#EAF0FE; --ok:#1FA36B; --ok-soft:#E6F7EF;
+    --warn:#C77F1A; --warn-soft:#FCF3E3; --bad:#D94460; --bad-soft:#FCEAEE;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--text);font-family:"Noto Sans SC","PingFang SC","Microsoft YaHei",-apple-system,sans-serif;font-size:14px;line-height:1.6}
+  .wrap{max-width:1080px;margin:0 auto;padding:24px 20px 80px}
+  .topbar{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;flex-wrap:wrap;gap:12px}
+  .title{font-size:20px;font-weight:700;letter-spacing:.5px}
+  .title small{font-size:12px;color:var(--sub);font-weight:400;margin-left:10px}
+  .navtabs{display:flex;gap:4px}
+  .navtabs a{padding:5px 14px;border-radius:8px;font-size:13px;color:var(--sub);text-decoration:none;border:1px solid transparent}
+  .navtabs a.on{background:var(--primary-soft);color:var(--primary);font-weight:600}
+  .navtabs a:hover{border-color:var(--border);color:var(--primary)}
+  button{cursor:pointer;border:1px solid var(--border);background:var(--card);color:var(--text);
+    border-radius:8px;padding:6px 14px;font-size:13px;font-family:inherit;transition:all .15s}
+  button:hover{border-color:var(--primary);color:var(--primary)}
+  button.small{padding:2px 10px;font-size:12px;border-radius:6px}
+  button.danger:hover{border-color:var(--bad);color:var(--bad)}
+  .chip{display:inline-block;padding:2px 10px;border-radius:999px;font-size:12px;border:1px solid var(--border);color:var(--sub);background:#fff}
+  .chip.ok{background:var(--ok-soft);color:var(--ok);border-color:transparent}
+  .chip.bad{background:var(--bad-soft);color:var(--bad);border-color:transparent}
+  .chip.blue{background:var(--primary-soft);color:var(--primary);border-color:transparent}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:18px 20px;margin-bottom:16px}
+  .p-meta{font-size:12px;color:var(--sub);display:flex;gap:16px;flex-wrap:wrap;margin:10px 0;align-items:center}
+  .p-ops{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;align-items:center}
+  .paid-box{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--sub);border:1px solid var(--border);border-radius:6px;padding:3px 10px;cursor:pointer;user-select:none}
+  .paid-box input{cursor:pointer}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{text-align:left;color:var(--sub);font-weight:500;font-size:12px;padding:6px 8px;border-bottom:1px solid var(--border)}
+  td{padding:7px 8px;border-bottom:1px solid #F0F3FA;vertical-align:middle}
+  tr:last-child td{border-bottom:none}
+  .model-id{font-family:Consolas,monospace;font-size:12.5px}
+  .q-num{font-size:12px;color:var(--sub)}
+  .sec-title{font-size:13px;font-weight:600;color:var(--sub);margin:22px 0 10px}
+  #toast{position:fixed;right:20px;bottom:20px;display:flex;flex-direction:column;gap:8px;z-index:99}
+  .toast{background:#1C2433;color:#fff;padding:9px 16px;border-radius:8px;font-size:13px;box-shadow:0 4px 16px rgba(0,0,0,.18);max-width:420px;word-break:break-all}
+  .toast.err{background:var(--bad)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="topbar">
+    <div class="title">LLM Key Hub<small>调用监控（仅本机 127.0.0.1）</small></div>
+    <div class="navtabs">
+      <a href="/">渠道管理</a>
+      <a href="/monitor" class="on">调用监控</a>
+    </div>
+  </div>
+
+  <div class="sec-title">经 Hub 轮询代理与页面测试的每一次调用 · 只记录，不做费用估计</div>
+  <div class="card">
+    <div id="logStats" class="p-meta" style="margin:0 0 8px">暂无调用记录</div>
+    <div id="logModels"></div>
+    <div class="p-ops" style="margin:10px 0 8px">
+      <button class="small" onclick="loadLogs()">刷新</button>
+      <label class="paid-box"><input type="checkbox" id="logAuto" checked onchange="toggleLogAuto()">每 10 秒自动刷新</label>
+      <button class="small danger" onclick="clearLogs()">清空日志</button>
+    </div>
+    <div id="logRows"></div>
+  </div>
+</div>
+<div id="toast"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+function toast(msg, isErr){
+  const t = document.createElement('div');
+  t.className = 'toast' + (isErr ? ' err' : '');
+  t.textContent = msg;
+  $('#toast').appendChild(t);
+  setTimeout(()=>t.remove(), isErr ? 7000 : 3000);
+}
+
+async function api(path, method, body){
+  const opt = {method: method||'GET', headers:{'Content-Type':'application/json'}};
+  if(body !== undefined) opt.body = JSON.stringify(body);
+  const r = await fetch(path, opt);
+  if(!r.ok){ throw new Error('HTTP ' + r.status); }
+  return await r.json();
+}
+
+function fmtNum(n){
+  if(n === null || n === undefined || n === '') return '—';
+  n = Number(n);
+  if(isNaN(n)) return String(n);
+  if(n >= 10000) return (n/10000).toFixed(1).replace(/\.0$/,'') + ' 万';
+  return n.toLocaleString();
+}
+
+let _logTimer = null;
+
+function fmtSec(ms){
+  if(ms === null || ms === undefined) return '—';
+  return (ms/1000).toFixed(2) + 's';
+}
+
+function tokCell(l){
+  if(l.blocked) return '—';
+  if(l.total_tokens == null) return '<span class="q-num">—</span>';
+  return '<span class="q-num" title="输入 ' + (l.prompt_tokens==null?'?':l.prompt_tokens) +
+    ' / 输出 ' + (l.completion_tokens==null?'?':l.completion_tokens) + '">' +
+    fmtNum(l.total_tokens) + '</span>';
+}
+
+function logStatusCell(l){
+  if(l.blocked) return '<span class="chip">已拦截</span>';
+  if(l.ok) return '<span class="chip ok">成功</span>';
+  return '<span class="chip bad" title="' + esc(l.error||'') + '">失败</span>';
+}
+
+function renderLogs(logs, st){
+  if(!st || !st.total){
+    $('#logStats').textContent = '暂无调用记录。通过「复制轮询三件套」接入的程序、或点页面上的「测试」，都会记录在这里。';
+    $('#logModels').innerHTML = '';
+    $('#logRows').innerHTML = '';
+    return;
+  }
+  $('#logStats').innerHTML =
+    '<span class="chip blue">总调用 ' + st.total + '</span>' +
+    '<span class="chip ok">成功率 ' + (st.ok_rate==null?'—':st.ok_rate+'%') + '</span>' +
+    (st.blocked ? '<span class="chip">拦截 ' + st.blocked + '</span>' : '') +
+    '<span class="chip">平均耗时 ' + fmtSec(st.avg_ms) + '</span>' +
+    '<span class="chip">tokens 合计 ' + fmtNum(st.tokens_total) + '</span>';
+  if(st.by_model && st.by_model.length){
+    $('#logModels').innerHTML = '<table><thead><tr><th>模型</th><th style="width:10%">调用</th><th style="width:10%">成功</th><th style="width:14%">平均耗时</th><th style="width:14%">tokens</th></tr></thead><tbody>' +
+      st.by_model.map(b => '<tr><td class="model-id">' + esc(b.model) + '</td><td>' + b.calls + '</td><td>' + b.ok + '</td><td>' + fmtSec(b.avg_ms) + '</td><td>' + fmtNum(b.tokens) + '</td></tr>').join('') +
+      '</tbody></table>';
+  } else {
+    $('#logModels').innerHTML = '';
+  }
+  $('#logRows').innerHTML = '<table><thead><tr><th style="width:15%">时间</th><th style="width:12%">渠道</th><th style="width:22%">模型</th><th style="width:9%">来源</th><th style="width:8%">状态</th><th style="width:9%">耗时</th><th style="width:9%">tokens</th><th>说明</th></tr></thead><tbody>' +
+    logs.map(l => {
+      const note = l.blocked ? esc(l.error || '被策略拦截')
+        : (l.rotated ? '轮询换模型' : '') + (l.stream ? (l.rotated?' · ':'') + '流式' : '') + (!l.ok && l.error ? esc(l.error).slice(0,80) : '');
+      return '<tr>' +
+        '<td class="q-num">' + esc((l.ts||'').slice(5)) + '</td>' +
+        '<td class="q-num">' + esc(l.provider||'—') + '</td>' +
+        '<td class="model-id">' + esc(l.model_used||l.model_requested||'—') + '</td>' +
+        '<td class="q-num">' + (l.source==='proxy'?'代理':'测试') + '</td>' +
+        '<td>' + logStatusCell(l) + '</td>' +
+        '<td class="q-num">' + (l.blocked ? '—' : fmtSec(l.latency_ms)) + '</td>' +
+        '<td>' + tokCell(l) + '</td>' +
+        '<td class="q-num">' + (note || '—') + '</td></tr>';
+    }).join('') + '</tbody></table>';
+}
+
+async function loadLogs(){
+  try{
+    const [lg, st] = await Promise.all([api('/api/logs?limit=60'), api('/api/logs/stats')]);
+    renderLogs(lg.logs || [], st);
+  }catch(e){ /* 忽略，下轮再试 */ }
+}
+
+async function clearLogs(){
+  if(!confirm('确定清空全部调用日志？')) return;
+  await api('/api/logs/clear', 'POST', {});
+  toast('日志已清空');
+  await loadLogs();
+}
+
+function toggleLogAuto(){
+  if($('#logAuto').checked){
+    if(!_logTimer) _logTimer = setInterval(loadLogs, 10000);
+  }else if(_logTimer){
+    clearInterval(_logTimer); _logTimer = null;
+  }
+}
+
+loadLogs();
+toggleLogAuto();
+</script>
+</body>
+</html>

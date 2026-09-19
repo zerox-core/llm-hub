@@ -1,0 +1,13 @@
+# 密钥与运行时数据（绝不入库）
+data.json
+*.log
+logs.jsonl
+server.err
+__pycache__/
+cliproxy/
+
+# 维护脚本（下划线开头）与 bat 的 txt 源文件
+_*.py
+_*.txt
+_*.ps1
+*.txt

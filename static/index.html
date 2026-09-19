@@ -1,0 +1,722 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LLM Key Hub · 本地模型钥匙管理</title>
+<style>
+  :root{
+    --bg:#F4F6FB; --card:#FFFFFF; --border:#E3E8F2; --text:#121722; --sub:#6D778C;
+    --primary:#2F5DDF; --primary-soft:#EAF0FE; --ok:#1FA36B; --ok-soft:#E6F7EF;
+    --warn:#C77F1A; --warn-soft:#FCF3E3; --bad:#D94460; --bad-soft:#FCEAEE;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--text);font-family:"Noto Sans SC","PingFang SC","Microsoft YaHei",-apple-system,sans-serif;font-size:14px;line-height:1.6}
+  .wrap{max-width:1080px;margin:0 auto;padding:24px 20px 80px}
+  .topbar{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;flex-wrap:wrap;gap:12px}
+  .title{font-size:20px;font-weight:700;letter-spacing:.5px}
+  .title small{font-size:12px;color:var(--sub);font-weight:400;margin-left:10px}
+  .topbar .actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .navtabs{display:flex;gap:4px}
+  .navtabs a{padding:5px 14px;border-radius:8px;font-size:13px;color:var(--sub);text-decoration:none;border:1px solid transparent}
+  .navtabs a.on{background:var(--primary-soft);color:var(--primary);font-weight:600}
+  .navtabs a:hover{border-color:var(--border);color:var(--primary)}
+  button{cursor:pointer;border:1px solid var(--border);background:var(--card);color:var(--text);
+    border-radius:8px;padding:6px 14px;font-size:13px;font-family:inherit;transition:all .15s}
+  button:hover{border-color:var(--primary);color:var(--primary)}
+  button.primary{background:var(--primary);border-color:var(--primary);color:#fff}
+  button.primary:hover{background:#2550c4;color:#fff}
+  button.small{padding:2px 10px;font-size:12px;border-radius:6px}
+  button.tiny{padding:0 6px;font-size:12px;border-radius:5px;line-height:1.5}
+  button.danger:hover{border-color:var(--bad);color:var(--bad)}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  .chip{display:inline-block;padding:2px 10px;border-radius:999px;font-size:12px;border:1px solid var(--border);color:var(--sub);background:#fff}
+  .chip.ok{background:var(--ok-soft);color:var(--ok);border-color:transparent}
+  .chip.warn{background:var(--warn-soft);color:var(--warn);border-color:transparent}
+  .chip.bad{background:var(--bad-soft);color:var(--bad);border-color:transparent}
+  .chip.blue{background:var(--primary-soft);color:var(--primary);border-color:transparent}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:18px 20px;margin-bottom:16px}
+  .card.collapsed{padding:12px 20px}
+  .p-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .p-head .grow{flex:1}
+  .p-name{font-size:16px;font-weight:600}
+  .p-active{font-size:12px;color:var(--sub)}
+  .p-active b{color:var(--primary);font-weight:600}
+  .p-meta{font-size:12px;color:var(--sub);display:flex;gap:16px;flex-wrap:wrap;margin:10px 0;align-items:center}
+  .p-meta code{background:#F0F3FA;padding:1px 6px;border-radius:4px;font-family:Consolas,monospace;font-size:12px}
+  .p-ops{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;align-items:center}
+  .paid-box{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--sub);border:1px solid var(--border);border-radius:6px;padding:3px 10px;cursor:pointer;user-select:none}
+  .paid-box.on{color:var(--warn);border-color:var(--warn);background:var(--warn-soft)}
+  .paid-box input{cursor:pointer}
+  .order-hint{font-size:12px;color:var(--sub);margin-bottom:6px}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{text-align:left;color:var(--sub);font-weight:500;font-size:12px;padding:6px 8px;border-bottom:1px solid var(--border)}
+  td{padding:7px 8px;border-bottom:1px solid #F0F3FA;vertical-align:middle}
+  tr:last-child td{border-bottom:none}
+  tr.current td{background:var(--primary-soft)}
+  .model-id{font-family:Consolas,monospace;font-size:12.5px}
+  .quota-bar{width:90px;height:6px;background:#EEF1F8;border-radius:3px;overflow:hidden;display:inline-block;vertical-align:middle;margin-right:6px}
+  .quota-bar i{display:block;height:100%;background:var(--ok);border-radius:3px}
+  .quota-bar i.warn{background:var(--warn)}
+  .quota-bar i.bad{background:var(--bad)}
+  .q-num{font-size:12px;color:var(--sub)}
+  .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px;vertical-align:middle}
+  .dot.ok{background:var(--ok)} .dot.bad{background:var(--bad)} .dot.unknown{background:#C4CCDC}
+  .cat{margin-top:6px;border:1px solid #EEF1F8;border-radius:8px;overflow:hidden}
+  .cat > summary{padding:7px 12px;font-size:13px;font-weight:600;color:var(--text);cursor:pointer;background:#F7F9FD;user-select:none;list-style:none}
+  .cat > summary::-webkit-details-marker{display:none}
+  .cat > summary .cnt{color:var(--sub);font-weight:400;font-size:12px;margin-left:6px}
+  .cat > summary::before{content:"▸ ";color:var(--sub)}
+  .cat[open] > summary::before{content:"▾ "}
+  .cat table{border-top:1px solid #EEF1F8}
+  .add-panel{display:none}
+  .add-panel.open{display:block}
+  .form-row{display:flex;gap:12px;margin-bottom:12px;flex-wrap:wrap}
+  .form-item{flex:1;min-width:200px}
+  .form-item label{display:block;font-size:12px;color:var(--sub);margin-bottom:4px}
+  .form-item input,.form-item select{width:100%;padding:7px 10px;border:1px solid var(--border);border-radius:8px;font-size:13px;font-family:inherit;background:#fff}
+  .form-item input:focus,.form-item select:focus{outline:none;border-color:var(--primary)}
+  .empty{color:var(--sub);text-align:center;padding:40px 0;font-size:13px}
+  #toast{position:fixed;right:20px;bottom:20px;display:flex;flex-direction:column;gap:8px;z-index:99}
+  .toast{background:#1C2433;color:#fff;padding:9px 16px;border-radius:8px;font-size:13px;box-shadow:0 4px 16px rgba(0,0,0,.18);max-width:420px;word-break:break-all}
+  .toast.err{background:var(--bad)}
+  .quota-line{font-size:12px;color:var(--sub)}
+  .ag-quota{margin:8px 0;padding:8px 10px;border:1px solid #E4E9F4;border-radius:8px;background:#FAFBFE}
+  .ag-quota .quota-line{display:flex;align-items:center;gap:6px;margin:3px 0;flex-wrap:wrap}
+  .ag-quota .ag-wname{display:inline-block;min-width:64px;color:var(--sub)}
+  .ag-group{border-top:1px dashed #E4E9F4;margin-top:4px;padding-top:2px}
+  details.raw{margin-top:8px}
+  details.raw summary{font-size:12px;color:var(--sub);cursor:pointer}
+  details.raw pre{background:#F7F9FD;border:1px solid var(--border);border-radius:8px;padding:10px;font-size:11px;max-height:260px;overflow:auto;white-space:pre-wrap;word-break:break-all}
+  .sec-title{font-size:13px;font-weight:600;color:var(--sub);margin:22px 0 10px}
+  .maskbtn{font-size:11px;color:var(--sub);background:none;border:none;padding:0 4px;text-decoration:underline}
+  .maskbtn:hover{color:var(--primary)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="topbar">
+    <div class="title">LLM Key Hub<small>本地大模型 Key · 额度管理（仅本机 127.0.0.1）</small></div>
+    <div class="navtabs">
+      <a href="/" class="on">渠道管理</a>
+      <a href="/monitor">调用监控</a>
+    </div>
+    <div class="actions">
+      <span id="quotaChip" class="chip">百炼额度：未同步</span>
+      <span id="hubKeyChip" class="chip" style="cursor:pointer" title="Hub 统一入口 key（/v1 接口鉴权用），点击复制完整 key" onclick="copyHubKey()">Hub Key：…</span>
+      <button onclick="toggleFreetier()">试用完即停：开启</button>
+      <button id="authBtn" onclick="startBlAuth()">授权百炼控制台</button>
+      <button id="agBtn" onclick="startAgAuth()">授权反重力 Google</button>
+      <button onclick="syncQuota()">同步百炼额度</button>
+      <button class="primary" onclick="toggleAdd()">+ 添加渠道</button>
+    </div>
+  </div>
+
+  <div id="addPanel" class="card add-panel">
+    <div class="form-row">
+      <div class="form-item" style="max-width:220px">
+        <label>渠道名称</label>
+        <input id="f-name" placeholder="如：百炼主账号">
+      </div>
+      <div class="form-item" style="max-width:180px">
+        <label>类型</label>
+        <select id="f-type" onchange="onTypeChange()">
+          <option value="bailian">阿里云百炼</option>
+          <option value="openai">OpenAI 兼容（通用）</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-item">
+        <label>Base URL</label>
+        <input id="f-url" value="https://dashscope.aliyuncs.com/compatible-mode/v1">
+      </div>
+      <div class="form-item">
+        <label>API Key</label>
+        <input id="f-key" placeholder="sk-...">
+      </div>
+    </div>
+    <div class="form-row">
+      <button class="primary" onclick="addProvider()">保存并自动拉取模型列表</button>
+      <button onclick="toggleAdd()">取消</button>
+      <span id="addMsg" class="quota-line"></span>
+    </div>
+  </div>
+
+  <div id="providers"></div>
+
+  <div class="sec-title">百炼免费额度明细（来自 bl usage free，分钟级口径以控制台为准）</div>
+  <div class="card">
+    <div id="quotaSummary" class="quota-line">尚未同步。点击右上角「同步百炼额度」。</div>
+    <details class="raw"><summary>查看原始返回（调试用）</summary><pre id="quotaRaw">（无）</pre></details>
+  </div>
+</div>
+<div id="toast"></div>
+
+<script>
+let STATE = null;
+const $ = s => document.querySelector(s);
+const esc = s => String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+const CAT_ORDER = ['文本生成','多模态','音频','向量模型','重排序','图像生成','视频生成','语音合成','语音识别','其他'];
+
+function catOf(m){
+  const n = (m||'').toLowerCase();
+  if(n.includes('embedding')) return '向量模型';
+  if(n.includes('rerank')) return '重排序';
+  if(n.includes('tts')||n.includes('cosyvoice')||n.includes('sambert')) return '语音合成';
+  if(n.includes('asr')||n.includes('paraformer')||n.includes('gummy')||n.includes('filetrans')) return '语音识别';
+  if(n.includes('t2v')||n.includes('i2v')||n.includes('r2v')||n.includes('video')||n.includes('happyhorse')) return '视频生成';
+  if(n.includes('t2i')||n.includes('i2i')||n.includes('image')||n.includes('wanx')||n.includes('flux')) return '图像生成';
+  if(n.includes('omni')||n.includes('vl')||n.includes('vision')) return '多模态';
+  if(n.includes('audio')||n.includes('livetranslate')) return '音频';
+  return '文本生成';
+}
+
+function toast(msg, isErr){
+  const t = document.createElement('div');
+  t.className = 'toast' + (isErr ? ' err' : '');
+  t.textContent = msg;
+  $('#toast').appendChild(t);
+  setTimeout(()=>t.remove(), isErr ? 7000 : 3000);
+}
+
+async function api(path, method, body){
+  const opt = {method: method||'GET', headers:{'Content-Type':'application/json'}};
+  if(body !== undefined) opt.body = JSON.stringify(body);
+  const r = await fetch(path, opt);
+  if(!r.ok){ throw new Error('HTTP ' + r.status); }
+  return await r.json();
+}
+
+function maskKey(k){
+  if(!k) return '（未设置）';
+  if(k.length <= 10) return k.slice(0,2) + '****';
+  return k.slice(0,5) + '...' + k.slice(-4);
+}
+
+function fmtNum(n){
+  if(n === null || n === undefined || n === '') return '—';
+  n = Number(n);
+  if(isNaN(n)) return String(n);
+  if(n >= 10000) return (n/10000).toFixed(1).replace(/\.0$/,'') + ' 万';
+  return n.toLocaleString();
+}
+
+// 免费额度状态：free_ok | free_empty | free_expired | no_entry
+function qState(m){
+  const q = (STATE.quota && STATE.quota.entries) ? STATE.quota.entries[m] : null;
+  if(!q) return 'no_entry';
+  const today = (STATE.server_time||'').slice(0,10);
+  if(q.expires && String(q.expires).slice(0,10) < today) return 'free_expired';
+  const rem = Number(q.remaining);
+  if(!isNaN(rem) && rem <= 0) return 'free_empty';
+  return 'free_ok';
+}
+
+// ---- 反重力（Antigravity）组额度：组内模型共享 5 小时 + 每周额度 ----
+function isAgProvider(p){ return p && p.type === 'openai' && (p.base_url||'').includes(':8317'); }
+function agModelGroup(m){ return (m||'').toLowerCase().startsWith('gemini') ? 'gemini' : 'third'; }
+function agGroupTitle(key){ return key === 'gemini' ? 'Gemini 组' : 'Claude/GPT 组'; }
+
+function agGroupInfo(m){
+  const key = agModelGroup(m);
+  const aq = STATE.ag_quota || {};
+  const title = agGroupTitle(key);
+  const cd = (((aq.groups||{})[key])||{}).cooldown_until || '';
+  if(cd && cd > (STATE.server_time||'')) return {key, title, state:'cooldown', cd, rem5:null, remw:null};
+  let rem5 = null, remw = null;
+  (aq.accounts||[]).forEach(a => { if(!a.ok) return; (a.groups||[]).forEach(g => {
+    if(g.key !== key) return;
+    (g.buckets||[]).forEach(b => {
+      if(b.window === '5h') rem5 = b.remaining;
+      if(b.window === 'weekly') remw = b.remaining;
+    });
+  });});
+  if(rem5 === null && remw === null) return {key, title, state:'unknown', cd, rem5, remw};
+  if((rem5 !== null && rem5 <= 0.0005) || (remw !== null && remw <= 0.0005))
+    return {key, title, state:'empty', cd, rem5, remw};
+  return {key, title, state:'ok', cd, rem5, remw};
+}
+
+function fmtReset(iso){
+  if(!iso) return '';
+  const t = new Date(iso);
+  if(isNaN(t)) return '';
+  const pad = n => String(n).padStart(2,'0');
+  const at = pad(t.getMonth()+1)+'-'+pad(t.getDate())+' '+pad(t.getHours())+':'+pad(t.getMinutes());
+  const ms = t - Date.now();
+  if(ms <= 0) return at + ' 重置';
+  const h = Math.floor(ms/3600000), m2 = Math.floor((ms%3600000)/60000);
+  const left = h >= 24 ? (Math.floor(h/24)+' 天 '+(h%24)+' 小时') : (h+' 小时 '+m2+' 分');
+  return at + ' 重置（剩 '+left+'）';
+}
+
+function quotaCell(m, isBailian, p){
+  if(p && isAgProvider(p)){
+    const info = agGroupInfo(m);
+    if(info.state === 'cooldown')
+      return '<span class="chip bad">冷却中</span> <span class="q-num">'+esc(info.title)+' · 至 '+esc((info.cd||'').slice(5,16))+'</span>';
+    if(info.state === 'empty')
+      return '<span class="chip bad">已用尽</span> <span class="q-num">'+esc(info.title)+'（等重置）</span>';
+    if(info.state === 'unknown')
+      return '<span class="chip">'+esc(info.title)+'</span> <span class="q-num">额度未同步</span>';
+    const worst = Math.min(info.rem5===null?1:info.rem5, info.remw===null?1:info.remw);
+    const pct = Math.max(0, Math.min(100, worst*100));
+    const cls = pct < 10 ? 'bad' : (pct < 30 ? 'warn' : '');
+    return '<span class="chip ok">'+esc(info.title)+'</span> ' +
+      '<span class="quota-bar"><i class="'+cls+'" style="width:'+pct.toFixed(1)+'%"></i></span>' +
+      '<span class="q-num">组余 '+(Math.round(worst*1000)/10)+'%</span>';
+  }
+  const q = (STATE.quota && STATE.quota.entries) ? STATE.quota.entries[m] : null;
+  if(!q) return isBailian ? '<span class="q-num" style="color:var(--bad)">无免费额度</span>' : '<span class="q-num">—</span>';
+  const st = qState(m);
+  let pct = null;
+  if(q.total && q.remaining !== null && q.remaining !== undefined && Number(q.total) > 0){
+    pct = Math.max(0, Math.min(100, Number(q.remaining)/Number(q.total)*100));
+  }
+  let cls = pct === null ? '' : (pct < 10 ? 'bad' : (pct < 30 ? 'warn' : ''));
+  let bar = pct === null ? '' :
+    '<span class="quota-bar"><i class="'+cls+'" style="width:'+pct.toFixed(1)+'%"></i></span>';
+  let exp = q.expires ? ' · 到期 ' + esc(String(q.expires).slice(0,10)) : '';
+  let tag = st === 'free_expired' ? '<span class="chip bad">已过期</span> ' :
+            st === 'free_empty' ? '<span class="chip bad">已用尽</span> ' : '';
+  return tag + bar + '<span class="q-num">剩 ' + fmtNum(q.remaining) + (q.total?' / '+fmtNum(q.total):'') + esc(exp) + '</span>';
+}
+
+function testCell(p, m){
+  const tr = (p.test_results||{})[m];
+  if(!tr) return '<span class="dot unknown"></span><span class="q-num">未测</span>';
+  if(tr.ok) return '<span class="dot ok"></span><span class="q-num">'+tr.latency_ms+'ms</span>';
+  return '<span class="dot bad"></span><span class="q-num" title="'+esc(tr.detail)+'">失败</span>';
+}
+
+function isCollapsed(pid){ return localStorage.getItem('hub_col_'+pid) === '1'; }
+function setCollapsed(pid, v){ localStorage.setItem('hub_col_'+pid, v ? '1' : '0'); }
+function isFreeOnly(pid){ return localStorage.getItem('hub_freeonly_'+pid) === '1'; }
+function setFreeOnly(pid, v){ localStorage.setItem('hub_freeonly_'+pid, v ? '1' : '0'); }
+function toggleFreeOnly(pid, on){ setFreeOnly(pid, on); render(); }
+
+function orderedModels(p){
+  const models = p.models || [];
+  const order = p.model_order || [];
+  const seen = new Set(); const out = [];
+  for(const m of order){ if(models.includes(m) && !seen.has(m)){ seen.add(m); out.push(m); } }
+  for(const m of models){ if(!seen.has(m)){ seen.add(m); out.push(m); } }
+  return out;
+}
+
+function renderAgQuota(p){
+  const aq = STATE.ag_quota || {};
+  const accounts = aq.accounts || [];
+  let inner = '';
+  if(!accounts.length){
+    inner = '<div class="quota-line">尚未同步反重力额度（5 小时 / 每周，按组共享）。</div>';
+  } else {
+    accounts.forEach(a => {
+      if(!a.ok){
+        inner += '<div class="quota-line" style="color:var(--bad)">'+esc(a.email)+'：同步失败 '+esc(a.error||'')+'</div>';
+        return;
+      }
+      (a.groups||[]).forEach(g => {
+        const cd = (g.cooldown_until && g.cooldown_until > (STATE.server_time||'')) ? g.cooldown_until : '';
+        inner += '<div class="ag-group"><div class="quota-line"><b>'+esc(g.title||g.display_name||g.key)+'</b>' +
+          '<span class="q-num">组内所有模型共享</span>' +
+          (cd ? '<span class="chip bad">冷却至 '+esc(cd.slice(5,16))+'</span>' : '') + '</div>';
+        ['5h','weekly'].forEach(w => {
+          const b = (g.buckets||[]).find(x => x.window === w);
+          if(!b) return;
+          const pct = (b.remaining === null || b.remaining === undefined) ? null : Math.max(0, Math.min(100, b.remaining*100));
+          const cls = pct === null ? '' : (pct < 10 ? 'bad' : (pct < 30 ? 'warn' : ''));
+          const bar = pct === null ? '' : '<span class="quota-bar"><i class="'+cls+'" style="width:'+pct.toFixed(1)+'%"></i></span>';
+          inner += '<div class="quota-line"><span class="ag-wname">'+(w==='5h'?'5 小时额度':'每周额度')+'</span>' + bar +
+            '<span class="q-num">'+(pct===null?'未知':('剩 '+(Math.round(pct*10)/10)+'%'))+' · '+esc(fmtReset(b.reset_time))+'</span></div>';
+        });
+        inner += '</div>';
+      });
+    });
+  }
+  const syncLine = '<div class="quota-line"><span class="q-num">'+(aq.synced_at ? '同步于 '+esc(aq.synced_at.slice(5,16)) : '')+'</span>' +
+    '<button class="small" onclick="syncAgQuota()">同步反重力额度</button></div>';
+  return '<div class="ag-quota"><div class="quota-line"><b>反重力额度</b>' +
+    '<span class="q-num">同组模型共享 5 小时 + 每周额度；某组耗尽后轮询自动只用另一组，重置后自动恢复</span></div>' +
+    inner + syncLine + '</div>';
+}
+
+function renderProvider(p){
+  const collapsed = isCollapsed(p.id);
+  const isBailian = p.type === 'bailian';
+  const isAg = isAgProvider(p);
+  const activeNoFree = isBailian && p.active_model && !p.allow_paid && qState(p.active_model) !== 'free_ok';
+  const activeWarn = activeNoFree ? ' <span class="chip bad">无免费额度</span>' : '';
+  const paidChip = p.allow_paid ? ' <span class="chip warn">允许付费</span>' : '';
+  let head = '<div class="p-head"><span class="p-name">'+esc(p.name)+'</span>' +
+    '<span class="chip">'+(isBailian?'阿里云百炼':'OpenAI 兼容')+'</span>' + paidChip +
+    '<span class="p-active">当前模型：<b>'+esc(p.active_model||'未选择')+'</b>'+activeWarn+'</span>' +
+    '<span class="grow"></span>' +
+    '<button class="small" onclick="toggleCollapse(\''+p.id+'\')">'+(collapsed?'展开':'收起')+'</button></div>';
+  if(collapsed) return '<div class="card collapsed">'+head+'</div>';
+
+  const models = orderedModels(p);
+  const nFree = isBailian ? models.filter(m => qState(m)==='free_ok').length : 0;
+
+  // 本卡片独立过滤：只看有免费额度
+  const freeOnly = isBailian && isFreeOnly(p.id);
+  const viewModels = freeOnly ? models.filter(m => qState(m)==='free_ok') : models;
+  const hiddenCnt = models.length - viewModels.length;
+
+  // 分类分组
+  const groups = {};
+  for(const m of viewModels){ const c = catOf(m); (groups[c] = groups[c] || []).push(m); }
+  const cats = Object.keys(groups).sort((a,b)=>{
+    let ia = CAT_ORDER.indexOf(a), ib = CAT_ORDER.indexOf(b);
+    if(ia<0) ia = CAT_ORDER.length-1; if(ib<0) ib = CAT_ORDER.length-1;
+    return ia - ib;
+  });
+  const catHtml = cats.map(c => {
+    const rows = groups[c].map(m => {
+      const cur = p.active_model === m;
+      const st = isBailian ? qState(m) : 'free_ok';
+      const noFree = isBailian && st !== 'free_ok';
+      const testBtn = (noFree && !p.allow_paid)
+        ? '<button class="small" disabled title="无免费额度，未勾选允许付费，不会发起调用">测试</button> '
+        : '<button class="small" onclick="testModel(\''+p.id+'\',\''+esc(m)+'\')">测试</button> ';
+      return '<tr class="'+(cur?'current':'')+'">' +
+        '<td class="model-id">'+esc(m)+(cur?' <span class="chip blue">当前</span>':'')+'</td>' +
+        '<td>'+quotaCell(m, isBailian, p)+'</td>' +
+        '<td>'+testCell(p, m)+'</td>' +
+        '<td style="white-space:nowrap">' +
+          '<button class="tiny" title="上移（轮询顺序）" onclick="moveModel(\''+p.id+'\',\''+esc(m)+'\',-1)">↑</button>' +
+          '<button class="tiny" title="下移（轮询顺序）" onclick="moveModel(\''+p.id+'\',\''+esc(m)+'\',1)">↓</button>' +
+        '</td>' +
+        '<td style="white-space:nowrap">' +
+          (cur ? '' : '<button class="small" onclick="setActive(\''+p.id+'\',\''+esc(m)+'\')">设为当前</button> ') +
+          testBtn +
+          '<button class="small" onclick="copyJoin(\''+p.id+'\',\''+esc(m)+'\')">复制接入</button> ' +
+          '<button class="small danger" onclick="delModel(\''+p.id+'\',\''+esc(m)+'\')">删除</button>' +
+        '</td></tr>';
+    }).join('');
+    const openByDefault = c === '文本生成' || groups[c].includes(p.active_model);
+    return '<details class="cat"'+(openByDefault?' open':'')+'><summary>'+esc(c)+'<span class="cnt">'+groups[c].length+' 个模型</span></summary>' +
+      '<table><thead><tr><th style="width:30%">模型</th><th style="width:30%">免费额度</th><th style="width:10%">连通性</th><th style="width:6%">排序</th><th>操作</th></tr></thead><tbody>'+rows+'</tbody></table></details>';
+  }).join('');
+
+  const fetchErr = p.fetch_error ? '<div class="quota-line" style="color:var(--bad)">'+esc(p.fetch_error)+'</div>' : '';
+  const paidBox = isBailian ?
+    '<label class="paid-box'+(p.allow_paid?' on':'')+'" title="勾选后：测试与轮询可使用无免费额度的模型（会计费）。默认不勾选＝只用免费额度。">' +
+    '<input type="checkbox" '+(p.allow_paid?'checked ':'')+'onchange="togglePaid(\''+p.id+'\', this.checked)">允许付费调用</label>' : '';
+  const freeOnlyBox = isBailian ?
+    '<label class="paid-box'+(freeOnly?' on':'')+'" title="只显示有免费额度的模型（仅影响本卡片显示，每个渠道各自独立设置）">' +
+    '<input type="checkbox" '+(freeOnly?'checked ':'')+'onchange="toggleFreeOnly(\''+p.id+'\', this.checked)">只看有免费额度</label>' : '';
+  const hiddenHint = (freeOnly && hiddenCnt > 0) ?
+    '<span class="q-num">已隐藏无免费额度 '+hiddenCnt+' 个</span>' : '';
+  const quotaNote = isBailian ? '<span class="chip '+(nFree?'ok':'bad')+'">有免费额度 '+nFree+' / '+models.length+'</span>' : '';
+
+  return '<div class="card">' + head +
+    '<div class="p-meta">' +
+      '<span>URL <code>'+esc(p.base_url)+'</code> <button class="small" onclick="cp(\''+esc(p.base_url)+'\')">复制</button></span>' +
+      '<span>Key <code id="key-'+p.id+'">'+esc(maskKey(p.api_key))+'</code> ' +
+        '<button class="small" onclick="cp(\''+esc(p.api_key)+'\')">复制</button>' +
+        '<button class="maskbtn" onclick="toggleKey(\''+p.id+'\')">显/隐</button></span>' +
+      (p.last_refresh ? '<span>模型于 '+esc(p.last_refresh)+' 刷新</span>' : '') + quotaNote +
+    '</div>' +
+    '<div class="p-ops">' +
+      '<button class="small" onclick="refreshModels(\''+p.id+'\')">刷新模型列表</button>' +
+      (isAg ? '<button class="small" title="同步反重力 5 小时 / 每周额度（不消耗对话额度）" onclick="syncAgQuota()">同步额度</button>' : '') +
+      '<button class="small" onclick="testModel(\''+p.id+'\',\''+esc(p.active_model||'')+'\')">测试当前模型</button>' +
+      '<button class="small" onclick="copyJoin(\''+p.id+'\',\''+esc(p.active_model||'')+'\')">复制当前三件套</button>' +
+      '<button class="small" title="BASE_URL=http://127.0.0.1:8787/v1，MODEL=auto，由 Hub 按排序自动轮询免费额度模型" onclick="copyHub(\''+p.id+'\')">复制轮询三件套</button>' +
+      '<button class="small danger" title="删除：免费额度已过期/已用尽 + 测试失败的模型" onclick="cleanup(\''+p.id+'\')">清理失效模型</button>' +
+      '<button class="small danger" onclick="delProvider(\''+p.id+'\',\''+esc(p.name)+'\')">删除渠道</button>' +
+      paidBox + freeOnlyBox + hiddenHint +
+    '</div>' +
+    (isAg ? renderAgQuota(p) : '') +
+    (viewModels.length ? '<div class="order-hint">轮询按下列顺序进行（↑↓ 调整）；模型=auto 时从第一个有免费额度的可对话模型开始逐个尝试。</div>' : '') +
+    fetchErr +
+    (viewModels.length ? catHtml :
+      (freeOnly ? '<div class="empty">当前过滤下没有模型（已勾选「只看有免费额度」）</div>'
+                : '<div class="empty">暂无模型，点「刷新模型列表」拉取</div>')) +
+  '</div>';
+}
+
+function render(){
+  const box = $('#providers');
+  const ps = STATE.providers || [];
+  if(!ps.length){
+    box.innerHTML = '<div class="card empty">还没有渠道。点右上角「+ 添加渠道」，填入 Base URL 和 Key 即可自动拉取模型列表。</div>';
+  } else {
+    box.innerHTML = ps.map(renderProvider).join('');
+  }
+  // Hub 统一 key
+  const hk = STATE.hub_key || '';
+  $('#hubKeyChip').textContent = 'Hub Key：' + (hk ? hk.slice(0,9) + '…' + hk.slice(-3) : '未生成');
+  // 额度区
+  const q = STATE.quota || {};
+  const entries = q.entries || {};
+  const keys = Object.keys(entries);
+  if(q.synced_at){
+    $('#quotaChip').className = 'chip ok';
+    $('#quotaChip').textContent = '百炼额度：' + q.synced_at.slice(5,16) + ' 已同步';
+    let lines = keys.map(k => {
+      const e = entries[k];
+      return esc(k) + '：剩 ' + fmtNum(e.remaining) + (e.total ? ' / ' + fmtNum(e.total) : '') + (e.expires ? ' · 到期 ' + esc(String(e.expires).slice(0,10)) : '');
+    });
+    $('#quotaSummary').innerHTML = lines.length ? lines.join('<br>') : '已同步，但未解析到条目（见下方原始返回）。';
+  } else {
+    let msg = '尚未同步。点击右上角「同步百炼额度」。';
+    let cls = 'chip';
+    if(q.last_error === 'console_login_required'){
+      msg = '需要一次性控制台授权：点右上角「授权百炼控制台」，浏览器会打开阿里云登录页，登录完成后额度会自动同步，以后不用再授权。';
+      cls = 'chip warn';
+    } else if(q.last_error === 'bl_missing'){
+      msg = '未检测到百炼 CLI（bl），请先安装：npm install -g bailian-cli';
+      cls = 'chip bad';
+    }
+    $('#quotaChip').className = cls;
+    $('#quotaChip').textContent = '百炼额度：' + (q.last_error ? '待处理' : '未同步');
+    $('#quotaSummary').textContent = msg;
+  }
+  $('#quotaRaw').textContent = q.raw ? JSON.stringify(q.raw, null, 2) : '（无）';
+}
+
+function toggleCollapse(pid){
+  setCollapsed(pid, !isCollapsed(pid));
+  render();
+}
+
+function toggleKey(pid){
+  const p = STATE.providers.find(x=>x.id===pid);
+  const el = document.getElementById('key-'+pid);
+  el.textContent = el.textContent === p.api_key ? maskKey(p.api_key) : p.api_key;
+}
+
+function cp(text){
+  navigator.clipboard.writeText(text).then(()=>toast('已复制')).catch(()=>{
+    const ta = document.createElement('textarea'); ta.value = text; document.body.appendChild(ta);
+    ta.select(); document.execCommand('copy'); ta.remove(); toast('已复制');
+  });
+}
+
+function copyJoin(pid, model){
+  const p = STATE.providers.find(x=>x.id===pid);
+  if(!p) return;
+  const m = model || p.active_model || '';
+  const text = 'BASE_URL=' + p.base_url + '\nAPI_KEY=' + p.api_key + '\nMODEL=' + m;
+  cp(text);
+}
+
+function copyHubKey(){
+  if(!STATE.hub_key){ toast('Hub key 未生成', true); return; }
+  cp(STATE.hub_key);
+  toast('已复制 Hub 统一 key（/v1 接口鉴权用）');
+}
+
+function copyHub(pid){
+  const p = STATE.providers.find(x=>x.id===pid);
+  const text = 'BASE_URL=' + (STATE.hub_base || 'http://127.0.0.1:8787/v1') +
+    '\nAPI_KEY=' + (STATE.hub_key || '(见顶栏 Hub Key)') +
+    '\nMODEL=auto' +
+    (p ? '\n# 请求头可加 X-Hub-Provider: ' + p.id + ' 指定渠道「' + p.name + '」（缺省为跨渠道大轮动）' : '');
+  cp(text);
+  toast('已复制统一三件套：MODEL=auto 时 Hub 跨渠道自动轮动免费额度模型');
+}
+
+function toggleAdd(){ $('#addPanel').classList.toggle('open'); }
+function onTypeChange(){
+  if($('#f-type').value === 'bailian') $('#f-url').value = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+}
+
+async function addProvider(){
+  const body = {name: $('#f-name').value, type: $('#f-type').value,
+                base_url: $('#f-url').value, api_key: $('#f-key').value};
+  if(!body.base_url){ toast('Base URL 必填', true); return; }
+  $('#addMsg').textContent = '正在保存并拉取模型列表…';
+  try{
+    const p = await api('/api/providers', 'POST', body);
+    $('#addMsg').textContent = '';
+    toggleAdd();
+    toast(p.fetch_error ? '已保存，但模型拉取失败' : '已添加，拉到 ' + (p.models||[]).length + ' 个模型');
+    await load();
+  }catch(e){ $('#addMsg').textContent = '保存失败：' + e.message; }
+}
+
+async function refreshModels(pid){
+  toast('正在拉取模型列表…');
+  const r = await api('/api/providers/'+pid+'/models/refresh', 'POST', {});
+  if(r.ok) toast('已刷新，共 ' + r.count + ' 个模型');
+  else toast(r.message || '拉取失败', true);
+  await load();
+}
+
+async function setActive(pid, model){
+  await api('/api/providers/'+pid+'/active', 'PUT', {model});
+  toast('当前模型已切换为 ' + model);
+  await load();
+}
+
+async function testModel(pid, model){
+  if(!model){ toast('请先选择模型', true); return; }
+  toast('正在测试 ' + model + ' …');
+  const r = await api('/api/providers/'+pid+'/test', 'POST', {model});
+  if(r.ok) toast(model + ' 连通正常（' + r.latency_ms + 'ms）');
+  else toast(model + '：' + r.detail, true);
+  await load();
+}
+
+async function moveModel(pid, model, dir){
+  await api('/api/providers/'+pid+'/order/move', 'POST', {model, dir});
+  await load();
+}
+
+async function delModel(pid, model){
+  if(!confirm('确定从列表删除模型「' + model + '」？（仅删本地记录，可随时「刷新模型列表」拉回）')) return;
+  await api('/api/providers/'+pid+'/models/delete', 'POST', {model});
+  toast('已删除 ' + model);
+  await load();
+}
+
+async function cleanup(pid){
+  if(!confirm('将删除：免费额度已过期/已用尽 + 测试失败的模型。确定清理？（仅删本地记录）')) return;
+  const r = await api('/api/providers/'+pid+'/models/cleanup', 'POST', {});
+  toast(r.removed && r.removed.length ? '已清理 ' + r.removed.length + ' 个模型，剩 ' + r.left + ' 个' : '没有需要清理的模型');
+  await load();
+}
+
+async function togglePaid(pid, on){
+  await api('/api/providers/'+pid, 'PUT', {allow_paid: on});
+  toast(on ? '已允许付费调用：测试与轮询可使用无免费额度的模型（会计费）' : '已关闭付费调用：仅使用免费额度', !on ? false : false);
+  await load();
+}
+
+async function toggleFreetier(){
+  toast('正在对全部免费额度模型开启「试用完即停」…');
+  try{
+    const r = await api('/api/bl/freetier', 'POST', {mode:'on'});
+    if(r.ok) toast('已开启「试用完即停」（全部免费额度模型）');
+    else toast('开启失败：' + (r.output || r.message || '未知错误'), true);
+  }catch(e){ toast('开启失败：' + e.message, true); }
+}
+
+async function delProvider(pid, name){
+  if(!confirm('确定删除渠道「' + name + '」？（仅删本地记录，不影响平台 Key）')) return;
+  await api('/api/providers/'+pid, 'DELETE');
+  toast('已删除');
+  await load();
+}
+
+async function syncQuota(){
+  toast('正在同步百炼免费额度…');
+  try{
+    const r = await api('/api/quota/refresh', 'POST', {});
+    if(r.ok) toast('额度已同步，共 ' + r.count + ' 个模型条目');
+    else if(r.state === 'console_login_required')
+      toast('需要控制台授权：点右上角「授权百炼控制台」按钮，在浏览器里登录即可', true);
+    else toast(r.message || '同步失败', true);
+  }catch(e){ toast('同步失败：' + e.message, true); }
+  await load();
+}
+
+let _authPoll = null;
+async function startBlAuth(){
+  const btn = $('#authBtn');
+  btn.disabled = true;
+  try{
+    const r = await api('/api/bl/login', 'POST', {});
+    toast(r.message || '授权流程已启动，请在浏览器完成登录');
+    btn.textContent = '等待浏览器登录…';
+    if(_authPoll) clearInterval(_authPoll);
+    _authPoll = setInterval(pollBlAuth, 3000);
+  }catch(e){
+    toast('启动授权失败：' + e.message, true);
+    btn.disabled = false;
+  }
+}
+
+async function pollBlAuth(){
+  try{
+    const s = await api('/api/bl/login/status');
+    if(s.running) return;
+    clearInterval(_authPoll); _authPoll = null;
+    const btn = $('#authBtn');
+    btn.disabled = false;
+    btn.textContent = '授权百炼控制台';
+    const qs = s.quota_sync;
+    if(qs && qs.ok){
+      toast('授权成功，额度已自动同步（' + qs.count + ' 个条目）');
+    }else if(qs && qs.state === 'console_login_required'){
+      toast('授权未完成或已取消，可重新点击「授权百炼控制台」', true);
+    }else{
+      toast('授权流程已结束：' + ((qs && qs.message) || '请再点同步额度确认'), qs && !qs.ok);
+    }
+    await load();
+  }catch(e){ /* 轮询失败忽略，下轮再试 */ }
+}
+
+// ---------------- 反重力（Google Antigravity）授权 ----------------
+let _agPoll = null;
+async function startAgAuth(){
+  const btn = $('#agBtn');
+  btn.disabled = true;
+  try{
+    const r = await api('/api/ag/login', 'POST', {});
+    toast(r.message || '授权流程已启动，请在浏览器完成 Google 登录');
+    btn.textContent = '等待 Google 授权…';
+    if(_agPoll) clearInterval(_agPoll);
+    _agPoll = setInterval(pollAgAuth, 3000);
+  }catch(e){
+    toast('启动授权失败：' + e.message, true);
+    btn.disabled = false;
+  }
+}
+
+async function pollAgAuth(){
+  try{
+    const s = await api('/api/ag/login/status');
+    if(s.running) return;
+    clearInterval(_agPoll); _agPoll = null;
+    const btn = $('#agBtn');
+    btn.disabled = false;
+    btn.textContent = '授权反重力 Google';
+    const hr = s.hub_refresh;
+    if(s.models_count > 0){
+      toast('反重力授权成功，反代可用模型 ' + s.models_count + ' 个' + (hr && hr.refreshed ? '，渠道已自动刷新' : ''));
+    }else{
+      toast('授权流程已结束，但反代还没有可用模型' + (s.log_tail ? '：' + s.log_tail.slice(-160) : '，可重试'), true);
+    }
+    await load();
+  }catch(e){ /* 轮询失败忽略，下轮再试 */ }
+}
+
+async function load(){
+  STATE = await api('/api/state');
+  render();
+  // 反重力额度超过 10 分钟未同步 → 后台同步一次再重渲染（不消耗对话额度）
+  try{
+    const hasAg = (STATE.providers||[]).some(isAgProvider);
+    if(hasAg && !window._agSyncing){
+      const st = (STATE.ag_quota||{}).synced_at || '';
+      const tSrv = Date.parse((STATE.server_time||'').replace(' ','T'));
+      const tSyn = st ? Date.parse(st.replace(' ','T')) : 0;
+      if(!st || (tSrv - tSyn) > 600000){
+        window._agSyncing = true;
+        api('/api/ag/quota/refresh', 'POST', {})
+          .then(()=>{ window._agSyncing = false; load(); })
+          .catch(()=>{ window._agSyncing = false; });
+      }
+    }
+  }catch(e){}
+}
+
+async function syncAgQuota(){
+  toast('正在同步反重力额度…');
+  try{
+    const r = await api('/api/ag/quota/refresh', 'POST', {});
+    if(r.ok) toast('已同步 ' + r.synced + ' / ' + r.accounts + ' 个反重力账号额度');
+    else toast('同步失败', true);
+  }catch(e){ toast('同步失败：' + e.message, true); }
+  await load();
+}
+load();
+</script>
+</body>
+</html>
