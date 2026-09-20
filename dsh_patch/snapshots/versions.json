@@ -1,0 +1,7 @@
+{
+  "patched_at": "2026-09-21",
+  "package_versions": {
+    "dsh": "0.1.5-rc.2",
+    "dsh-web-frontend": "0.1.5-rc.2"
+  }
+}
