@@ -115,7 +115,8 @@ function render(st){
   $('#btnOpen').disabled = !st.running;
   if(st.running){
     const f = $('#dshFrame');
-    if(f.src === 'about:blank' || !f.src){ f.src = st.url; }
+    const abs = new URL(st.url, location.href).href;
+    if(f.src !== abs){ f.src = abs; }
     $('#frameCard').style.display = 'block';
   }else{
     $('#frameCard').style.display = 'none';

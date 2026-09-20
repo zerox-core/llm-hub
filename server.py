@@ -1678,7 +1678,9 @@ def api_logs_clear():
 # ---------------- DeepSeek Harness（dsh）子窗口管理 ----------------
 
 DSH_PORT = 3080
-DSH_HOME = Path.home() / ".dsh"
+# DSH HOME: 优先环境变量 DSH_HOME，否则 F 盘迁移目标，否则回落到本机 ~/.dsh（兼容老位置）
+_DSH_HOME_FALLBACK = Path(r"F:\deepseek-harness\home")
+DSH_HOME = Path(os.environ.get("DSH_HOME") or (_DSH_HOME_FALLBACK if _DSH_HOME_FALLBACK.exists() else (Path.home() / ".dsh")))
 DSH_SETTINGS = DSH_HOME / "settings.yaml"
 DSH_PID_FILE = BASE_DIR / "dsh.pid"
 DSH_LOG_FILE = BASE_DIR / "logs" / "dsh.log"
@@ -1717,9 +1719,25 @@ def _dsh_ensure_settings():
 def _dsh_http_up():
     try:
         r = httpx.get("http://127.0.0.1:%d/" % DSH_PORT, timeout=1.5)
-        return r.status_code == 200
+        # 401 = dsh 活着且要求 token(默认鉴权),也算运行中
+        return r.status_code in (200, 401)
     except Exception:
         return False
+
+
+def _dsh_token_url():
+    """从 dsh.log 解析最后一次启动的带 token URL。"""
+    fallback = "http://127.0.0.1:%d/" % DSH_PORT
+    try:
+        text = DSH_LOG_FILE.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return fallback
+    url = None
+    for ln in text.splitlines():
+        if "token=" in ln and "http" in ln:
+            i = ln.find("http")
+            url = ln[i:].strip().split()[0]
+    return url or fallback
 
 
 def _dsh_pid_by_port():
@@ -1742,7 +1760,7 @@ def _dsh_status():
     return {
         "running": _dsh_http_up(),
         "port": DSH_PORT,
-        "url": "http://127.0.0.1:%d/" % DSH_PORT,
+        "url": _dsh_token_url(),
         "settings_ok": DSH_SETTINGS.exists(),
         "settings_path": str(DSH_SETTINGS),
     }
@@ -1755,29 +1773,56 @@ def _dsh_start():
         return {"ok": False, "message": "写入 %s 失败" % DSH_SETTINGS}
     dsh = shutil.which("dsh")
     if not dsh:
-        return {"ok": False, "message": "未找到 dsh 命令，请先执行：npm install -g @deepseek-ai/dsh"}
+        cand = r"F:\deepseek-harness\app\node_modules\.bin\dsh.CMD"
+        if os.path.exists(cand):
+            dsh = cand
+    if not dsh:
+        return {"ok": False, "message": "未找到 dsh 命令，请先在 F:\\deepseek-harness\\app 执行 npm install @deepseek-ai/dsh"}
     env = dict(os.environ)
     env["HUB_API_KEY"] = get_hub_key(load_data())
+    env["DSH_HOME"] = str(DSH_HOME).strip()
+    # 直接以列表形式启动 node.exe 跑 dsh 的 bin.js,绕开 .CMD 与 cmd.exe 两层包装。
+    # 实测:DETACHED + cmd.exe 的 `>>` 重定向链路里,cmd 内部命令(echo)能落盘,
+    # 但 node 的 stdout 完全不落盘,dsh web 的 token URL 永远进不了 dsh.log,
+    # /harness 页 iframe 因此 401。改由 Python 自己 open 日志句柄交给子进程继承。
+    node_exe = shutil.which("node")
+    if not node_exe:
+        cand = r"C:\Program Files\nodejs\node.exe"
+        if os.path.exists(cand):
+            node_exe = cand
+    if not node_exe:
+        return {"ok": False, "message": "未找到 node.exe"}
+    bin_js = r"F:\deepseek-harness\app\node_modules\@deepseek-ai\dsh\lib\bin.js"
+    if not os.path.exists(bin_js) and dsh:
+        bin_js = os.path.normpath(os.path.join(
+            os.path.dirname(str(dsh)), "..", "@deepseek-ai", "dsh", "lib", "bin.js"))
+    if not os.path.exists(bin_js):
+        return {"ok": False, "message": "未找到 dsh 入口 bin.js"}
     try:
-        logf = open(DSH_LOG_FILE, "ab")
+        DSH_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        log_fh = open(DSH_LOG_FILE, "ab")
         try:
             proc = subprocess.Popen(
-                [dsh, "web", "--no-open"],
-                cwd=str(BASE_DIR), env=env, stdout=logf, stderr=subprocess.STDOUT,
+                [node_exe, bin_js, "web", "--no-open"],
+                cwd=str(BASE_DIR), env=env,
+                stdout=log_fh, stderr=subprocess.STDOUT,
                 creationflags=0x00000008 | 0x00000200)
         finally:
-            logf.close()
+            log_fh.close()
     except Exception as e:
         return {"ok": False, "message": "启动失败：%r" % e}
-    try:
-        DSH_PID_FILE.write_text(str(proc.pid), encoding="utf-8")
-    except Exception:
-        pass
-    for _ in range(50):
+    time.sleep(0.3)
+    real_pid = _dsh_pid_by_port()
+    if real_pid:
+        try:
+            DSH_PID_FILE.write_text(str(real_pid), encoding="utf-8")
+        except Exception:
+            pass
+    for _ in range(60):
         if _dsh_http_up():
             return {"ok": True, "started": True, "message": "dsh web 已启动"}
         time.sleep(0.5)
-    return {"ok": False, "message": "dsh 已拉起但端口 %d 在 25 秒内未就绪，详见 logs/dsh.log" % DSH_PORT}
+    return {"ok": False, "message": "dsh 已拉起但端口 %d 在 30 秒内未就绪，详见 logs/dsh.log" % DSH_PORT}
 
 
 def _dsh_stop():
