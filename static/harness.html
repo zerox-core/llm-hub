@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>LLM Key Hub · DeepSeek Harness</title>
-<link rel="stylesheet" href="/static/hub.css?v=4">
+<link rel="stylesheet" href="/static/hub.css?v=5">
 </head>
 <body class="page-harness">
 <aside class="sidebar">
@@ -19,13 +19,7 @@
 <button class="side-expand" data-side-toggle title="展开侧栏">☰</button>
 <div class="main">
   <div class="shell-bar">
-    <div class="mpick">
-      <button class="mpick-btn" id="mpickBtn" onclick="toggleMpick(event)" title="选择模型：Auto = 号池轮询，指定模型 = 锁定">
-        <span class="mpick-label" id="mpickLabel">加载中…</span>
-        <span class="mpick-caret">▾</span>
-      </button>
-      <div class="mpick-panel" id="mpickPanel" style="display:none"></div>
-    </div>
+    <div class="spacer"></div>
     <div id="frameTools" class="frame-tools" style="display:none">
       <a id="openTab" href="#" target="_blank" rel="noopener">⤢ 新标签</a>
       <button id="btnStop" onclick="stopDsh()" title="停止 dsh 服务">⏻ 停止</button>
@@ -35,14 +29,21 @@
     <iframe id="dshFrame" src="about:blank" title="DeepSeek Harness Web UI" style="display:none"></iframe>
     <div id="downPane" class="harness-down">
       <div class="big"><span id="stDot" class="dot bad"></span> DeepSeek Harness <span id="stChip" class="chip">检测中…</span></div>
-      <div class="sub">dsh web 服务未在运行。模型在顶部栏切换：Auto = 号池自动轮询，指定模型 = 锁定单模型（候选 = 渠道管理号池中已勾选的模型）；出口 provider <code>llm-hub</code> → <code>127.0.0.1:8787/v1</code>。</div>
+      <div class="sub">dsh web 服务未在运行。模型切换 = 页面上悬浮的模型卡片（可拖动换位）：Auto = 号池自动轮询，指定模型 = 锁定单模型（候选 = 渠道管理号池中已勾选的模型）；出口 provider <code>llm-hub</code> → <code>127.0.0.1:8787/v1</code>。</div>
       <button id="btnStart" class="primary" onclick="startDsh()">启动 DeepSeek Harness</button>
+    </div>
+    <div class="mpick-float" id="mpickFloat">
+      <button class="mpick-btn" id="mpickBtn" onclick="toggleMpick(event)" title="点击切换模型 · 可拖动换位（Auto = 号池轮询，指定模型 = 锁定）">
+        <span class="mpick-label" id="mpickLabel">加载中…</span>
+        <span class="mpick-caret">▾</span>
+      </button>
+      <div class="mpick-panel" id="mpickPanel" style="display:none"></div>
     </div>
   </div>
 </div>
 <div id="toast"></div>
 
-<script src="/static/hub.js?v=4"></script>
+<script src="/static/hub.js?v=5"></script>
 <script>
 let STATE = {running: false, url: 'http://127.0.0.1:3080/'};
 const $ = s => document.querySelector(s);
@@ -122,8 +123,61 @@ function toggleMpick(e){
 
 document.addEventListener('click', function(e){
   const p = $('#mpickPanel');
-  if(p && p.style.display !== 'none' && !e.target.closest('.mpick')){ p.style.display = 'none'; }
+  if(p && p.style.display !== 'none' && !e.target.closest('.mpick-float')){ p.style.display = 'none'; }
 });
+
+/* ===== 悬浮卡片拖动换位（位置存 localStorage，下次打开保持） ===== */
+(function initFloat(){
+  const FLOAT_KEY = 'hub_mpick_float_pos';
+  const el = document.getElementById('mpickFloat');
+  const btn = document.getElementById('mpickBtn');
+  if(!el || !btn){ return; }
+  try{
+    const saved = JSON.parse(localStorage.getItem(FLOAT_KEY) || 'null');
+    if(saved && typeof saved.x === 'number' && typeof saved.y === 'number'){
+      el.style.left = saved.x + '%';
+      el.style.top = saved.y + '%';
+    }
+  }catch(e){}
+  let dragging = false, moved = false, startX = 0, startY = 0, baseL = 0, baseT = 0;
+  btn.addEventListener('pointerdown', function(e){
+    dragging = true; moved = false;
+    startX = e.clientX; startY = e.clientY;
+    const wrap = el.parentElement.getBoundingClientRect();
+    const r = el.getBoundingClientRect();
+    baseL = r.left - wrap.left; baseT = r.top - wrap.top;
+    el.classList.add('dragging');
+    try{ btn.setPointerCapture(e.pointerId); }catch(err){}
+  });
+  btn.addEventListener('pointermove', function(e){
+    if(!dragging){ return; }
+    const dx = e.clientX - startX, dy = e.clientY - startY;
+    if(!moved && Math.abs(dx) + Math.abs(dy) < 5){ return; }
+    moved = true;
+    const wrap = el.parentElement.getBoundingClientRect();
+    let L = Math.max(4, Math.min(baseL + dx, wrap.width - el.offsetWidth - 4));
+    let T = Math.max(4, Math.min(baseT + dy, wrap.height - el.offsetHeight - 4));
+    el.style.left = (L / wrap.width * 100) + '%';
+    el.style.top = (T / wrap.height * 100) + '%';
+  });
+  btn.addEventListener('pointerup', function(){
+    if(dragging && moved){
+      const wrap = el.parentElement.getBoundingClientRect();
+      const r = el.getBoundingClientRect();
+      try{
+        localStorage.setItem(FLOAT_KEY, JSON.stringify({
+          x: (r.left - wrap.left) / wrap.width * 100,
+          y: (r.top - wrap.top) / wrap.height * 100
+        }));
+      }catch(err){}
+    }
+    dragging = false;
+    el.classList.remove('dragging');
+  });
+  btn.addEventListener('click', function(e){
+    if(moved){ e.stopImmediatePropagation(); moved = false; }
+  }, true);
+})();
 
 async function pickModel(m){
   $('#mpickPanel').style.display = 'none';
