@@ -3,105 +3,23 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>LLM Key Hub · 本地模型钥匙管理</title>
-<style>
-  :root{
-    --bg:#F4F6FB; --card:#FFFFFF; --border:#E3E8F2; --text:#121722; --sub:#6D778C;
-    --primary:#2F5DDF; --primary-soft:#EAF0FE; --ok:#1FA36B; --ok-soft:#E6F7EF;
-    --warn:#C77F1A; --warn-soft:#FCF3E3; --bad:#D94460; --bad-soft:#FCEAEE;
-  }
-  *{box-sizing:border-box;margin:0;padding:0}
-  body{background:var(--bg);color:var(--text);font-family:"Noto Sans SC","PingFang SC","Microsoft YaHei",-apple-system,sans-serif;font-size:14px;line-height:1.6}
-  .wrap{max-width:1080px;margin:0 auto;padding:24px 20px 80px}
-  .topbar{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;flex-wrap:wrap;gap:12px}
-  .title{font-size:20px;font-weight:700;letter-spacing:.5px}
-  .title small{font-size:12px;color:var(--sub);font-weight:400;margin-left:10px}
-  .topbar .actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-  .navtabs{display:flex;gap:4px}
-  .navtabs a{padding:5px 14px;border-radius:8px;font-size:13px;color:var(--sub);text-decoration:none;border:1px solid transparent}
-  .navtabs a.on{background:var(--primary-soft);color:var(--primary);font-weight:600}
-  .navtabs a:hover{border-color:var(--border);color:var(--primary)}
-  button{cursor:pointer;border:1px solid var(--border);background:var(--card);color:var(--text);
-    border-radius:8px;padding:6px 14px;font-size:13px;font-family:inherit;transition:all .15s}
-  button:hover{border-color:var(--primary);color:var(--primary)}
-  button.primary{background:var(--primary);border-color:var(--primary);color:#fff}
-  button.primary:hover{background:#2550c4;color:#fff}
-  button.small{padding:2px 10px;font-size:12px;border-radius:6px}
-  button.tiny{padding:0 6px;font-size:12px;border-radius:5px;line-height:1.5}
-  button.danger:hover{border-color:var(--bad);color:var(--bad)}
-  button:disabled{opacity:.4;cursor:not-allowed}
-  .chip{display:inline-block;padding:2px 10px;border-radius:999px;font-size:12px;border:1px solid var(--border);color:var(--sub);background:#fff}
-  .chip.ok{background:var(--ok-soft);color:var(--ok);border-color:transparent}
-  .chip.warn{background:var(--warn-soft);color:var(--warn);border-color:transparent}
-  .chip.bad{background:var(--bad-soft);color:var(--bad);border-color:transparent}
-  .chip.blue{background:var(--primary-soft);color:var(--primary);border-color:transparent}
-  .card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:18px 20px;margin-bottom:16px}
-  .card.collapsed{padding:12px 20px}
-  .p-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-  .p-head .grow{flex:1}
-  .p-name{font-size:16px;font-weight:600}
-  .p-active{font-size:12px;color:var(--sub)}
-  .p-active b{color:var(--primary);font-weight:600}
-  .p-meta{font-size:12px;color:var(--sub);display:flex;gap:16px;flex-wrap:wrap;margin:10px 0;align-items:center}
-  .p-meta code{background:#F0F3FA;padding:1px 6px;border-radius:4px;font-family:Consolas,monospace;font-size:12px}
-  .p-ops{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;align-items:center}
-  .paid-box{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--sub);border:1px solid var(--border);border-radius:6px;padding:3px 10px;cursor:pointer;user-select:none}
-  .paid-box.on{color:var(--warn);border-color:var(--warn);background:var(--warn-soft)}
-  .paid-box input{cursor:pointer}
-  .order-hint{font-size:12px;color:var(--sub);margin-bottom:6px}
-  table{width:100%;border-collapse:collapse;font-size:13px}
-  th{text-align:left;color:var(--sub);font-weight:500;font-size:12px;padding:6px 8px;border-bottom:1px solid var(--border)}
-  td{padding:7px 8px;border-bottom:1px solid #F0F3FA;vertical-align:middle}
-  tr:last-child td{border-bottom:none}
-  tr.current td{background:var(--primary-soft)}
-  .model-id{font-family:Consolas,monospace;font-size:12.5px}
-  .quota-bar{width:90px;height:6px;background:#EEF1F8;border-radius:3px;overflow:hidden;display:inline-block;vertical-align:middle;margin-right:6px}
-  .quota-bar i{display:block;height:100%;background:var(--ok);border-radius:3px}
-  .quota-bar i.warn{background:var(--warn)}
-  .quota-bar i.bad{background:var(--bad)}
-  .q-num{font-size:12px;color:var(--sub)}
-  .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px;vertical-align:middle}
-  .dot.ok{background:var(--ok)} .dot.bad{background:var(--bad)} .dot.unknown{background:#C4CCDC}
-  .cat{margin-top:6px;border:1px solid #EEF1F8;border-radius:8px;overflow:hidden}
-  .cat > summary{padding:7px 12px;font-size:13px;font-weight:600;color:var(--text);cursor:pointer;background:#F7F9FD;user-select:none;list-style:none}
-  .cat > summary::-webkit-details-marker{display:none}
-  .cat > summary .cnt{color:var(--sub);font-weight:400;font-size:12px;margin-left:6px}
-  .cat > summary::before{content:"▸ ";color:var(--sub)}
-  .cat[open] > summary::before{content:"▾ "}
-  .cat table{border-top:1px solid #EEF1F8}
-  .add-panel{display:none}
-  .add-panel.open{display:block}
-  .form-row{display:flex;gap:12px;margin-bottom:12px;flex-wrap:wrap}
-  .form-item{flex:1;min-width:200px}
-  .form-item label{display:block;font-size:12px;color:var(--sub);margin-bottom:4px}
-  .form-item input,.form-item select{width:100%;padding:7px 10px;border:1px solid var(--border);border-radius:8px;font-size:13px;font-family:inherit;background:#fff}
-  .form-item input:focus,.form-item select:focus{outline:none;border-color:var(--primary)}
-  .empty{color:var(--sub);text-align:center;padding:40px 0;font-size:13px}
-  #toast{position:fixed;right:20px;bottom:20px;display:flex;flex-direction:column;gap:8px;z-index:99}
-  .toast{background:#1C2433;color:#fff;padding:9px 16px;border-radius:8px;font-size:13px;box-shadow:0 4px 16px rgba(0,0,0,.18);max-width:420px;word-break:break-all}
-  .toast.err{background:var(--bad)}
-  .quota-line{font-size:12px;color:var(--sub)}
-  .ag-quota{margin:8px 0;padding:8px 10px;border:1px solid #E4E9F4;border-radius:8px;background:#FAFBFE}
-  .ag-quota .quota-line{display:flex;align-items:center;gap:6px;margin:3px 0;flex-wrap:wrap}
-  .ag-quota .ag-wname{display:inline-block;min-width:64px;color:var(--sub)}
-  .ag-group{border-top:1px dashed #E4E9F4;margin-top:4px;padding-top:2px}
-  details.raw{margin-top:8px}
-  details.raw summary{font-size:12px;color:var(--sub);cursor:pointer}
-  details.raw pre{background:#F7F9FD;border:1px solid var(--border);border-radius:8px;padding:10px;font-size:11px;max-height:260px;overflow:auto;white-space:pre-wrap;word-break:break-all}
-  .sec-title{font-size:13px;font-weight:600;color:var(--sub);margin:22px 0 10px}
-  .maskbtn{font-size:11px;color:var(--sub);background:none;border:none;padding:0 4px;text-decoration:underline}
-  .maskbtn:hover{color:var(--primary)}
-</style>
+<title>LLM Key Hub · 渠道管理</title>
+<link rel="stylesheet" href="/static/hub.css?v=2">
 </head>
 <body>
+<aside class="sidebar">
+  <div class="side-brand">LLM Key Hub<small>本地大模型钥匙管理</small></div>
+  <nav class="side-nav">
+    <a href="/harness"><span class="ico">◆</span>DeepSeek Harness</a>
+    <a href="/" class="on"><span class="ico">▦</span>渠道管理</a>
+    <a href="/monitor"><span class="ico">≡</span>调用监控</a>
+  </nav>
+  <div class="side-foot">仅监听本机回环<br>http://127.0.0.1:8787</div>
+</aside>
+<div class="main">
 <div class="wrap">
   <div class="topbar">
-    <div class="title">LLM Key Hub<small>本地大模型 Key · 额度管理（仅本机 127.0.0.1）</small></div>
-    <div class="navtabs">
-      <a href="/" class="on">渠道管理</a>
-      <a href="/monitor">调用监控</a>
-      <a href="/harness">Harness 智能体</a>
-    </div>
+    <div class="title">渠道管理<small>号池 · 账号 · 模型勾选（仅本机 127.0.0.1）</small></div>
     <div class="actions">
       <span id="quotaChip" class="chip">百炼额度：未同步</span>
       <span id="hubUrlChip" class="chip" style="cursor:pointer" title="Hub 统一入口 URL（OpenAI 兼容 /v1），点击复制" onclick="copyHubUrl()">URL：…</span>
@@ -146,13 +64,32 @@
     </div>
   </div>
 
+  <div class="sec-title" style="display:flex;align-items:center;gap:10px">
+    <span>号池（号池 → 账号 → 模型；勾选的模型才进入可调列表与轮询）</span>
+    <button class="small" onclick="addPool()">+ 新建号池</button>
+  </div>
   <div id="providers"></div>
+
+  <div class="sec-title">WorkBuddy 渠道组（预留）</div>
+  <div class="card wb-card">
+    <div class="p-head">
+      <span class="p-name">WorkBuddy 反代</span>
+      <span class="chip">待接入</span>
+      <span class="grow"></span>
+      <button class="small" disabled title="接入方式未定，等实际登录 WorkBuddy 账号看过之后再开通">接入 WorkBuddy（未开放）</button>
+    </div>
+    <div class="kv">
+      <span>规划：登录 WorkBuddy 账号后，把其中的模型反代进 Hub —— 既包括<b>免费额度模型</b>，也包括账号里的<b>积分额度模型</b>。</span>
+      <span>接入方式待实际登录账号后确定（候选：官方 OpenAI Key 直连 / 账号会话反代），确定后此卡片组升级为完整渠道组。</span>
+    </div>
+  </div>
 
   <div class="sec-title">百炼免费额度明细（来自 bl usage free，分钟级口径以控制台为准）</div>
   <div class="card">
     <div id="quotaSummary" class="quota-line">尚未同步。点击右上角「同步百炼额度」。</div>
     <details class="raw"><summary>查看原始返回（调试用）</summary><pre id="quotaRaw">（无）</pre></details>
   </div>
+</div>
 </div>
 <div id="toast"></div>
 
@@ -188,7 +125,11 @@ async function api(path, method, body){
   const opt = {method: method||'GET', headers:{'Content-Type':'application/json'}};
   if(body !== undefined) opt.body = JSON.stringify(body);
   const r = await fetch(path, opt);
-  if(!r.ok){ throw new Error('HTTP ' + r.status); }
+  if(!r.ok){
+    let msg = 'HTTP ' + r.status;
+    try{ const j = await r.json(); msg = j.detail || j.message || msg; }catch(e){}
+    throw new Error(msg);
+  }
   return await r.json();
 }
 
@@ -215,6 +156,13 @@ function qState(m){
   const rem = Number(q.remaining);
   if(!isNaN(rem) && rem <= 0) return 'free_empty';
   return 'free_ok';
+}
+
+// ---- 模型勾选（号池）----
+function isEnabled(p, m){ return !(p.disabled_models || []).includes(m); }
+function enabledCount(p){
+  const total = (p.models||[]).length;
+  return total - ((p.disabled_models||[]).filter(m => (p.models||[]).includes(m)).length);
 }
 
 // ---- 反重力（Antigravity）组额度：组内模型共享 5 小时 + 每周额度 ----
@@ -309,6 +257,14 @@ function orderedModels(p){
   return out;
 }
 
+// 渲染前后保持各分类 details 的展开状态
+function snapshotOpenCats(){
+  const open = new Set();
+  document.querySelectorAll('details.cat[open]').forEach(d => open.add(d.id));
+  return open;
+}
+let _openCats = new Set();
+
 function renderAgQuota(p){
   const aq = STATE.ag_quota || {};
   const accounts = aq.accounts || [];
@@ -346,6 +302,14 @@ function renderAgQuota(p){
     inner + syncLine + '</div>';
 }
 
+function poolSwitchSel(p){
+  const pools = STATE.pools || [];
+  if(pools.length <= 1) return '';
+  const opts = pools.map(pl =>
+    '<option value="'+esc(pl.id)+'"'+(pl.id === p.pool_id ? ' selected' : '')+'>'+esc(pl.name)+'</option>').join('');
+  return '<select class="poolsel" title="移至号池" onchange="moveToPool(\''+p.id+'\', this.value)">'+opts+'</select>';
+}
+
 function renderProvider(p){
   const collapsed = isCollapsed(p.id);
   const isBailian = p.type === 'bailian';
@@ -355,8 +319,9 @@ function renderProvider(p){
   const paidChip = p.allow_paid ? ' <span class="chip warn">允许付费</span>' : '';
   let head = '<div class="p-head"><span class="p-name">'+esc(p.name)+'</span>' +
     '<span class="chip">'+(isBailian?'阿里云百炼':'OpenAI 兼容')+'</span>' + paidChip +
+    '<span class="chip blue">已勾选 '+enabledCount(p)+' / '+(p.models||[]).length+'</span>' +
     '<span class="p-active">当前模型：<b>'+esc(p.active_model||'未选择')+'</b>'+activeWarn+'</span>' +
-    '<span class="grow"></span>' +
+    '<span class="grow"></span>' + poolSwitchSel(p) +
     '<button class="small" onclick="toggleCollapse(\''+p.id+'\')">'+(collapsed?'展开':'收起')+'</button></div>';
   if(collapsed) return '<div class="card collapsed">'+head+'</div>';
 
@@ -377,15 +342,18 @@ function renderProvider(p){
     return ia - ib;
   });
   const catHtml = cats.map(c => {
+    const catId = 'cat-' + p.id + '-' + c;
     const rows = groups[c].map(m => {
       const cur = p.active_model === m;
+      const en = isEnabled(p, m);
       const st = isBailian ? qState(m) : 'free_ok';
       const noFree = isBailian && st !== 'free_ok';
       const testBtn = (noFree && !p.allow_paid)
         ? '<button class="small" disabled title="无免费额度，未勾选允许付费，不会发起调用">测试</button> '
         : '<button class="small" onclick="testModel(\''+p.id+'\',\''+esc(m)+'\')">测试</button> ';
-      return '<tr class="'+(cur?'current':'')+'">' +
-        '<td class="model-id">'+esc(m)+(cur?' <span class="chip blue">当前</span>':'')+'</td>' +
+      return '<tr class="'+(cur?'current':'')+(en?'':' mdis')+'">' +
+        '<td style="width:3%"><input type="checkbox" class="mchk" title="勾选 = 进入可调列表（轮询与 Harness 单选）" '+(en?'checked ':'')+'onchange="toggleModel(\''+p.id+'\',\''+esc(m)+'\', this.checked)"></td>' +
+        '<td class="model-id">'+esc(m)+(cur?' <span class="chip blue">当前</span>':'')+(en?'':' <span class="chip">未勾选</span>')+'</td>' +
         '<td>'+quotaCell(m, isBailian, p)+'</td>' +
         '<td>'+testCell(p, m)+'</td>' +
         '<td style="white-space:nowrap">' +
@@ -399,9 +367,10 @@ function renderProvider(p){
           '<button class="small danger" onclick="delModel(\''+p.id+'\',\''+esc(m)+'\')">删除</button>' +
         '</td></tr>';
     }).join('');
-    const openByDefault = c === '文本生成' || groups[c].includes(p.active_model);
-    return '<details class="cat"'+(openByDefault?' open':'')+'><summary>'+esc(c)+'<span class="cnt">'+groups[c].length+' 个模型</span></summary>' +
-      '<table><thead><tr><th style="width:30%">模型</th><th style="width:30%">免费额度</th><th style="width:10%">连通性</th><th style="width:6%">排序</th><th>操作</th></tr></thead><tbody>'+rows+'</tbody></table></details>';
+    const openByDefault = _openCats.size ? _openCats.has(catId) : (c === '文本生成' || groups[c].includes(p.active_model));
+    const enCnt = groups[c].filter(m => isEnabled(p, m)).length;
+    return '<details class="cat" id="'+catId+'"'+(openByDefault?' open':'')+'><summary>'+esc(c)+'<span class="cnt">'+groups[c].length+' 个模型 · 已勾选 '+enCnt+'</span></summary>' +
+      '<table><thead><tr><th style="width:3%"></th><th style="width:29%">模型</th><th style="width:28%">免费额度</th><th style="width:10%">连通性</th><th style="width:6%">排序</th><th>操作</th></tr></thead><tbody>'+rows+'</tbody></table></details>';
   }).join('');
 
   const fetchErr = p.fetch_error ? '<div class="quota-line" style="color:var(--bad)">'+esc(p.fetch_error)+'</div>' : '';
@@ -426,6 +395,8 @@ function renderProvider(p){
     '<div class="p-ops">' +
       '<button class="small" onclick="refreshModels(\''+p.id+'\')">刷新模型列表</button>' +
       (isAg ? '<button class="small" title="同步反重力 5 小时 / 每周额度（不消耗对话额度）" onclick="syncAgQuota()">同步额度</button>' : '') +
+      '<button class="small" title="勾选本渠道全部模型（进入可调列表）" onclick="bulkEnable(\''+p.id+'\', true)">全选模型</button>' +
+      '<button class="small" title="取消勾选本渠道全部模型（退出可调列表与轮询）" onclick="bulkEnable(\''+p.id+'\', false)">全不选</button>' +
       '<button class="small" onclick="testModel(\''+p.id+'\',\''+esc(p.active_model||'')+'\')">测试当前模型</button>' +
       '<button class="small" onclick="copyJoin(\''+p.id+'\',\''+esc(p.active_model||'')+'\')">复制当前三件套</button>' +
       '<button class="small" title="BASE_URL=http://127.0.0.1:8787/v1，MODEL=auto，由 Hub 按排序自动轮询免费额度模型" onclick="copyHub(\''+p.id+'\')">复制轮询三件套</button>' +
@@ -434,7 +405,7 @@ function renderProvider(p){
       paidBox + freeOnlyBox + hiddenHint +
     '</div>' +
     (isAg ? renderAgQuota(p) : '') +
-    (viewModels.length ? '<div class="order-hint">轮询按下列顺序进行（↑↓ 调整）；模型=auto 时从第一个有免费额度的可对话模型开始逐个尝试。</div>' : '') +
+    (viewModels.length ? '<div class="order-hint">勾选 = 模型进入可调列表（auto 轮询与 Harness 单选都只用已勾选模型）；轮询按下列顺序进行（↑↓ 调整）。</div>' : '') +
     fetchErr +
     (viewModels.length ? catHtml :
       (freeOnly ? '<div class="empty">当前过滤下没有模型（已勾选「只看有免费额度」）</div>'
@@ -442,11 +413,29 @@ function renderProvider(p){
   '</div>';
 }
 
+function renderPool(pl){
+  const ps = STATE.providers || [];
+  const provs = (pl.providers || []).map(pid => ps.find(x => x.id === pid)).filter(Boolean);
+  const multi = (STATE.pools || []).length > 1;
+  const head = '<div class="pool-head"><span class="pool-name">'+esc(pl.name)+'</span>' +
+    '<span class="chip">'+provs.length+' 个账号</span>' +
+    '<span class="grow"></span>' +
+    '<button class="small" onclick="renamePool(\''+esc(pl.id)+'\',\''+esc(pl.name)+'\')">重命名</button>' +
+    (multi ? '<button class="small danger" onclick="delPool(\''+esc(pl.id)+'\',\''+esc(pl.name)+'\')">删除号池</button>' : '') +
+    '</div>';
+  const body = provs.length ? provs.map(renderProvider).join('')
+    : '<div class="card empty">本号池还没有账号，点右上角「+ 添加渠道」。</div>';
+  return '<div class="pool-block">' + head + body + '</div>';
+}
+
 function render(){
   const box = $('#providers');
   const ps = STATE.providers || [];
+  const pools = STATE.pools || [];
   if(!ps.length){
     box.innerHTML = '<div class="card empty">还没有渠道。点右上角「+ 添加渠道」，填入 Base URL 和 Key 即可自动拉取模型列表。</div>';
+  } else if(pools.length){
+    box.innerHTML = pools.map(renderPool).join('');
   } else {
     box.innerHTML = ps.map(renderProvider).join('');
   }
@@ -557,6 +546,64 @@ async function addProvider(){
   }catch(e){ $('#addMsg').textContent = '保存失败：' + e.message; }
 }
 
+// ---------------- 号池管理 ----------------
+async function addPool(){
+  const name = prompt('新号池名称：', '号池 ' + (((STATE.pools||[]).length) + 1));
+  if(!name) return;
+  try{
+    await api('/api/pools', 'POST', {name});
+    toast('号池已创建，把渠道卡片右上角的号池下拉切过去即可归入');
+    await load();
+  }catch(e){ toast('创建失败：' + e.message, true); }
+}
+
+async function renamePool(poolId, oldName){
+  const name = prompt('号池名称：', oldName);
+  if(!name || name === oldName) return;
+  try{
+    await api('/api/pools/' + poolId, 'PUT', {name});
+    await load();
+  }catch(e){ toast('重命名失败：' + e.message, true); }
+}
+
+async function delPool(poolId, name){
+  if(!confirm('确定删除号池「' + name + '」？号池内的账号会自动并入第一个号池，不会被删除。')) return;
+  try{
+    await api('/api/pools/' + poolId, 'DELETE');
+    toast('号池已删除，账号已并入剩余号池');
+    await load();
+  }catch(e){ toast('删除失败：' + e.message, true); }
+}
+
+async function moveToPool(pid, poolId){
+  try{
+    await api('/api/pools/' + poolId, 'PUT', {provider_id: pid});
+    toast('已移动渠道到新号池');
+    await load();
+  }catch(e){ toast('移动失败：' + e.message, true); }
+}
+
+// ---------------- 模型勾选 ----------------
+async function toggleModel(pid, model, enabled){
+  try{
+    await api('/api/providers/'+pid+'/models/enabled', 'POST', {model, enabled});
+  }catch(e){
+    toast('勾选失败：' + e.message, true);
+  }
+  await load();
+}
+
+async function bulkEnable(pid, enabled){
+  if(!enabled && !confirm('确定取消勾选本渠道全部模型？auto 轮询与 Harness 单选将不再使用它们。')) return;
+  try{
+    await api('/api/providers/'+pid+'/models/enabled_bulk', 'POST', {enabled});
+    toast(enabled ? '已全选本渠道模型' : '已取消勾选本渠道全部模型');
+  }catch(e){
+    toast('操作失败：' + e.message, true);
+  }
+  await load();
+}
+
 async function refreshModels(pid){
   toast('正在拉取模型列表…');
   const r = await api('/api/providers/'+pid+'/models/refresh', 'POST', {});
@@ -601,7 +648,7 @@ async function cleanup(pid){
 
 async function togglePaid(pid, on){
   await api('/api/providers/'+pid, 'PUT', {allow_paid: on});
-  toast(on ? '已允许付费调用：测试与轮询可使用无免费额度的模型（会计费）' : '已关闭付费调用：仅使用免费额度', !on ? false : false);
+  toast(on ? '已允许付费调用：测试与轮询可使用无免费额度的模型（会计费）' : '已关闭付费调用：仅使用免费额度');
   await load();
 }
 
@@ -705,6 +752,7 @@ async function pollAgAuth(){
 }
 
 async function load(){
+  _openCats = snapshotOpenCats();
   STATE = await api('/api/state');
   render();
   // 反重力额度超过 10 分钟未同步 → 后台同步一次再重渲染（不消耗对话额度）

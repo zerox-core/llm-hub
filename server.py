@@ -85,7 +85,22 @@ def _migrate_provider(p):
     p.setdefault("test_results", {})
     p.setdefault("models", [])
     p.setdefault("active_model", None)
+    p.setdefault("disabled_models", [])   # 号池里被取消勾选的模型
+    p.setdefault("pool_id", None)         # 所属号池
     return p
+
+
+def _migrate_pools(d):
+    """号池迁移：无号池时建默认号池并把现有渠道全部归入；渠道缺 pool_id 时归入第一个号池。"""
+    pools = d.setdefault("pools", [])
+    if not pools:
+        pools.append({"id": "pool_default", "name": "默认号池",
+                      "created_at": time.strftime("%Y-%m-%d %H:%M:%S")})
+    ids = {pl["id"] for pl in pools}
+    default_id = pools[0]["id"]
+    for p in d.get("providers", []):
+        if p.get("pool_id") not in ids:
+            p["pool_id"] = default_id
 
 
 def load_data():
@@ -100,8 +115,11 @@ def load_data():
         d.setdefault("quota", {"synced_at": None, "entries": {}, "raw": None, "last_error": None})
         d.setdefault("ag_quota", {"accounts": [], "synced_at": "", "groups": {}})
         d.setdefault("hub_key", "")
+        d.setdefault("harness_model", "auto")       # Harness 模型选择：auto=轮询 / 具体模型=锁定
+        d.setdefault("autostart_harness", True)     # 启动器联动：Hub 启动后自动拉起 dsh
         for p in d["providers"]:
             _migrate_provider(p)
+        _migrate_pools(d)
         return d
 
 
@@ -387,8 +405,11 @@ def chat_candidates(d, p, extra_cats=None):
     """轮询候选：按排序，且（bailian 未允许付费时）必须有免费额度；仅保留可对话类别。
     extra_cats：额外放行的类别（仅 /v1/models 列表展示用，auto 轮询不传、不受影响）。"""
     cats = CHAT_CATS | set(extra_cats or ())
+    disabled = set(p.get("disabled_models") or [])
     out = []
     for m in ordered_models(p):
+        if m in disabled:
+            continue
         if model_category(m) not in cats:
             continue
         if p.get("type") == "bailian" and not p.get("allow_paid"):
@@ -412,6 +433,11 @@ def all_chat_candidates(d):
         for m in chat_candidates(d, p):
             pairs.append((p, m))
     return pairs
+
+
+def model_disabled(p, model):
+    """模型是否在号池中被取消勾选（取消勾选 = 不进轮询、不可经 Hub 调用）。"""
+    return model in (p.get("disabled_models") or [])
 
 
 def find_model_provider(d, model):
@@ -633,6 +659,9 @@ def state():
         "bl_installed": bool(bl),
         "hub_base": HUB_BASE,
         "hub_key": get_hub_key(d),
+        "pools": _pool_view(d),
+        "harness_model": d.get("harness_model") or "auto",
+        "autostart_harness": bool(d.get("autostart_harness", True)),
         "server_time": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
 
@@ -821,6 +850,161 @@ def test(pid: str, inp: ModelIn):
               "total_tokens": u.get("total_tokens"),
               "error": None if ok else detail[:300]})
     return {"ok": ok, "latency_ms": ms, "detail": detail}
+
+
+# ---------------- 号池（号池 → 账号 → 模型）与模型勾选 ----------------
+
+class PoolIn(BaseModel):
+    name: str
+
+
+class PoolUpdate(BaseModel):
+    name: str | None = None
+    provider_id: str | None = None      # 把该渠道移入本号池
+
+
+class EnabledIn(BaseModel):
+    model: str
+    enabled: bool
+
+
+class EnabledBulkIn(BaseModel):
+    enabled: bool
+    models: list[str] | None = None     # None = 本渠道全部模型
+
+
+def _pool_view(d):
+    out = []
+    for pl in d.get("pools") or []:
+        provs = [p for p in d["providers"] if p.get("pool_id") == pl["id"]]
+        out.append({"id": pl["id"], "name": pl.get("name") or pl["id"],
+                    "providers": [p["id"] for p in provs]})
+    known = {pl["id"] for pl in d.get("pools") or []}
+    rest = [p for p in d["providers"] if p.get("pool_id") not in known]
+    if rest:
+        out.append({"id": "", "name": "未分组", "providers": [p["id"] for p in rest]})
+    return out
+
+
+@app.get("/api/pools")
+def list_pools():
+    d = load_data()
+    return {"pools": _pool_view(d)}
+
+
+@app.post("/api/pools")
+def add_pool(inp: PoolIn):
+    d = load_data()
+    pl = {"id": "pool_" + uuid.uuid4().hex[:8],
+          "name": inp.name.strip() or "未命名号池",
+          "created_at": time.strftime("%Y-%m-%d %H:%M:%S")}
+    d["pools"].append(pl)
+    save_data(d)
+    return pl
+
+
+@app.put("/api/pools/{pool_id}")
+def update_pool(pool_id: str, inp: PoolUpdate):
+    d = load_data()
+    pl = next((x for x in d["pools"] if x["id"] == pool_id), None)
+    if not pl:
+        raise HTTPException(404, "pool not found")
+    if inp.name is not None:
+        pl["name"] = inp.name.strip() or pl["name"]
+    if inp.provider_id:
+        p = next((x for x in d["providers"] if x["id"] == inp.provider_id), None)
+        if not p:
+            raise HTTPException(404, "provider not found")
+        p["pool_id"] = pool_id
+    save_data(d)
+    return {"ok": True}
+
+
+@app.delete("/api/pools/{pool_id}")
+def delete_pool(pool_id: str):
+    d = load_data()
+    if len(d["pools"]) <= 1:
+        raise HTTPException(400, "至少保留一个号池")
+    pl = next((x for x in d["pools"] if x["id"] == pool_id), None)
+    if not pl:
+        raise HTTPException(404, "pool not found")
+    d["pools"] = [x for x in d["pools"] if x["id"] != pool_id]
+    default_id = d["pools"][0]["id"]
+    for p in d["providers"]:
+        if p.get("pool_id") == pool_id:
+            p["pool_id"] = default_id
+    save_data(d)
+    return {"ok": True}
+
+
+@app.post("/api/providers/{pid}/models/enabled")
+def set_model_enabled(pid: str, inp: EnabledIn):
+    d, p = get_provider(pid)
+    dis = p.setdefault("disabled_models", [])
+    if inp.enabled:
+        p["disabled_models"] = [m for m in dis if m != inp.model]
+    elif inp.model not in dis:
+        dis.append(inp.model)
+    save_data(d)
+    return {"ok": True, "enabled": inp.enabled}
+
+
+@app.post("/api/providers/{pid}/models/enabled_bulk")
+def set_models_enabled_bulk(pid: str, inp: EnabledBulkIn):
+    d, p = get_provider(pid)
+    targets = inp.models if inp.models is not None else list(p.get("models") or [])
+    dis = set(p.get("disabled_models") or [])
+    if inp.enabled:
+        dis -= set(targets)
+    else:
+        dis |= set(targets)
+    p["disabled_models"] = sorted(dis)
+    save_data(d)
+    return {"ok": True, "disabled": len(p["disabled_models"])}
+
+
+# ---------------- Harness 模型选择（Auto = 轮询 / 单选 = 锁定） ----------------
+
+class HarnessModelIn(BaseModel):
+    model: str = "auto"
+
+
+def _harness_options(d):
+    """可选模型 = 各渠道号池中已勾选、且满足免费额度/AG 组策略的可对话模型。"""
+    opts = []
+    for p in d["providers"]:
+        if not p.get("base_url"):
+            continue
+        ms = chat_candidates(d, p)
+        if ms:
+            opts.append({"provider_id": p["id"],
+                         "provider_name": p.get("name") or p["id"],
+                         "models": ms})
+    return opts
+
+
+@app.get("/api/harness/model")
+def get_harness_model():
+    d = load_data()
+    return {"model": d.get("harness_model") or "auto",
+            "options": _harness_options(d)}
+
+
+@app.post("/api/harness/model")
+def set_harness_model(inp: HarnessModelIn):
+    d = load_data()
+    m = (inp.model or "auto").strip()
+    if m != "auto":
+        p = find_model_provider(d, m)
+        if p is None:
+            raise HTTPException(404, "模型不在任何渠道：%s" % m)
+        if model_disabled(p, m):
+            raise HTTPException(400, "模型未在号池中勾选：%s" % m)
+        if model_category(m) not in CHAT_CATS:
+            raise HTTPException(400, "该模型不是可对话模型：%s" % m)
+    d["harness_model"] = m
+    save_data(d)
+    return {"ok": True, "model": m}
 
 
 @app.post("/api/quota/refresh")
@@ -1171,6 +1355,21 @@ async def hub_chat(req: Request):
     model = body.get("model") or "auto"
     stream = bool(body.get("stream"))
 
+    # Harness 模型选择：锁定具体模型时，model=auto 的请求固定走该模型（不再轮询）
+    if model == "auto" and not req.headers.get("x-hub-provider"):
+        pin = (d.get("harness_model") or "auto").strip()
+        if pin and pin != "auto":
+            _pp = find_model_provider(d, pin)
+            if _pp is None or model_disabled(_pp, pin):
+                log_call({"source": "proxy", "provider": None,
+                          "model_requested": "auto", "model_used": None,
+                          "ok": False, "blocked": True, "latency_ms": 0,
+                          "error": "锁定模型不可用：" + pin})
+                return JSONResponse(status_code=409, content={"error": {
+                    "message": "Harness 锁定模型 %s 已不可用（被删除或未在号池勾选）。请到 Harness 页重新选择，或切回 Auto。" % pin,
+                    "type": "hub_pin_invalid"}})
+            model = pin
+
     if req.headers.get("x-hub-provider"):
         p = _pick_provider(d, req)
         scoped = [(p, m) for m in (chat_candidates(d, p) if model == "auto" else [model])]
@@ -1194,6 +1393,14 @@ async def hub_chat(req: Request):
                 "message": "没有可调用的免费额度模型（全部无额度/耗尽/过期）。如确认付费调用，请在 Hub 页面勾选「允许付费」。",
                 "type": "hub_no_free_model"}})
     else:
+        if model_disabled(p, model):
+            log_call({"source": "proxy", "provider": p.get("name"),
+                      "model_requested": model, "model_used": model,
+                      "ok": False, "blocked": True, "latency_ms": 0,
+                      "error": "号池未勾选拦截"})
+            return JSONResponse(status_code=403, content={"error": {
+                "message": "模型 %s 未在号池中勾选，已拦截。请到渠道管理页勾选后再调用。" % model,
+                "type": "hub_model_disabled"}})
         if p.get("type") == "bailian" and not p.get("allow_paid"):
             st, _ = quota_state(d, model)
             if st != "free_ok":
@@ -1542,6 +1749,13 @@ async def anth_messages(req: Request):
     model = body.get("model") or "auto"
     if find_model_provider(d, model) is None:
         model = "auto"
+    if model == "auto" and not req.headers.get("x-hub-provider"):
+        pin = (d.get("harness_model") or "auto").strip()
+        if pin and pin != "auto":
+            _pp = find_model_provider(d, pin)
+            if _pp is None or model_disabled(_pp, pin):
+                return _anth_err(409, "Harness 锁定模型 %s 已不可用，请到 Harness 页重新选择或切回 Auto。" % pin)
+            model = pin
     obody = _anth_to_openai(body)
     obody["model"] = model
     stream = obody["stream"]
@@ -1562,6 +1776,8 @@ async def anth_messages(req: Request):
         return _anth_err(403, "没有可调用的免费额度模型（全部无额度/耗尽/过期）。")
     if model != "auto":
         p0 = scoped[0][0]
+        if model_disabled(p0, model):
+            return _anth_err(403, "模型 %s 未在号池中勾选，已拦截。" % model)
         if is_ag_provider(p0):
             agst, _r5, _rw, cd = ag_group_state(d, model)
             if agst in ("empty", "cooldown"):
@@ -1841,6 +2057,18 @@ def _dsh_stop():
     return {"ok": True, "message": "已停止"}
 
 
+@app.get("/static/{filename}")
+def static_files(filename: str):
+    fn = (STATIC_DIR / filename).resolve()
+    try:
+        fn.relative_to(STATIC_DIR.resolve())
+    except ValueError:
+        raise HTTPException(404)
+    if not fn.is_file():
+        raise HTTPException(404)
+    return FileResponse(fn)
+
+
 @app.get("/harness")
 def harness_page():
     return FileResponse(STATIC_DIR / "harness.html")
@@ -1861,6 +2089,29 @@ def api_harness_stop():
     return _dsh_stop()
 
 
+def _autostart_harness_worker():
+    """Hub 启动后按配置自动拉起 dsh（DeepSeek Harness），与渠道管理联动。"""
+    for _ in range(60):
+        try:
+            r = httpx.get("http://127.0.0.1:8787/api/state", timeout=1.5)
+            if r.status_code == 200:
+                break
+        except Exception:
+            pass
+        time.sleep(0.5)
+    else:
+        return
+    try:
+        d = load_data()
+        if not d.get("autostart_harness", True):
+            return
+        time.sleep(0.5)
+        r = _dsh_start()
+        print("[autostart] dsh: %s" % (r.get("message") or r))
+    except Exception as e:
+        print("[autostart] dsh failed: %r" % e)
+
+
 if __name__ == "__main__":
     import socket
     _s = socket.socket()
@@ -1874,6 +2125,7 @@ if __name__ == "__main__":
         print("无需重复启动，直接在浏览器打开上面的地址即可。本窗口可以关闭。")
         sys.exit(0)
     print("LLM Key Hub 已启动: http://127.0.0.1:8787  (仅监听本机回环)")
+    threading.Thread(target=_autostart_harness_worker, daemon=True).start()
     try:
         uvicorn.run(app, host="127.0.0.1", port=8787, log_level="warning")
     except OSError as e:

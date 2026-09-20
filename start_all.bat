@@ -34,15 +34,26 @@ if %errorlevel%==0 (
   powershell -NoProfile -Command "Start-Process -FilePath 'cloudflared' -ArgumentList 'tunnel','--config','%YML%','run','16ec6d44-d9e7-47a1-b384-32bc38800aff' -WindowStyle Hidden -RedirectStandardOutput '%LOGS%\tunnel_out.log' -RedirectStandardError '%LOGS%\tunnel_err.log'"
 )
 
-rem --- 4. wait for hub then open page ---
+rem --- 4. wait for hub ---
 powershell -NoProfile -Command "$ok=$false; foreach ($i in 1..25) { try { $r = Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 'http://127.0.0.1:8787/api/state'; $ok=$true; break } catch { Start-Sleep -Seconds 1 } }; if ($ok) { exit 0 } else { exit 1 }"
 if %errorlevel%==0 (
-  echo [ok] Hub up - opening http://127.0.0.1:8787
-  start "" http://127.0.0.1:8787
+  echo [ok] Hub up
 ) else (
   echo [FAIL] Hub not up - see %LOGS%\hub_err.log
   pause
   exit /b 1
 )
+
+rem --- 5. start DeepSeek Harness (idempotent; hub also autostarts it on boot) ---
+powershell -NoProfile -Command "try { Invoke-RestMethod -Method Post -TimeoutSec 8 'http://127.0.0.1:8787/api/harness/start' ^| Out-Null; exit 0 } catch { exit 1 }"
+if %errorlevel%==0 (
+  echo [ok] DeepSeek Harness start requested
+) else (
+  echo [warn] Harness start request failed - open Harness page to retry
+)
+
+rem --- 6. open pages: DeepSeek Harness + channel manager ---
+start "" http://127.0.0.1:8787/harness
+start "" http://127.0.0.1:8787/
 endlocal
 exit /b 0

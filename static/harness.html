@@ -3,57 +3,34 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>LLM Key Hub · Harness 智能体</title>
-<style>
-  :root{
-    --bg:#F4F6FB; --card:#FFFFFF; --border:#E3E8F2; --text:#121722; --sub:#6D778C;
-    --primary:#2F5DDF; --primary-soft:#EAF0FE; --ok:#1FA36B; --ok-soft:#E6F7EF;
-    --warn:#C77F1A; --warn-soft:#FCF3E3; --bad:#D94460; --bad-soft:#FCEAEE;
-  }
-  *{box-sizing:border-box;margin:0;padding:0}
-  body{background:var(--bg);color:var(--text);font-family:"Noto Sans SC","PingFang SC","Microsoft YaHei",-apple-system,sans-serif;font-size:14px;line-height:1.6}
-  .wrap{max-width:1280px;margin:0 auto;padding:24px 20px 40px}
-  .topbar{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;flex-wrap:wrap;gap:12px}
-  .title{font-size:20px;font-weight:700;letter-spacing:.5px}
-  .title small{font-size:12px;color:var(--sub);font-weight:400;margin-left:10px}
-  .navtabs{display:flex;gap:4px}
-  .navtabs a{padding:5px 14px;border-radius:8px;font-size:13px;color:var(--sub);text-decoration:none;border:1px solid transparent}
-  .navtabs a.on{background:var(--primary-soft);color:var(--primary);font-weight:600}
-  .navtabs a:hover{border-color:var(--border);color:var(--primary)}
-  button{cursor:pointer;border:1px solid var(--border);background:var(--card);color:var(--text);
-    border-radius:8px;padding:6px 14px;font-size:13px;font-family:inherit;transition:all .15s}
-  button:hover{border-color:var(--primary);color:var(--primary)}
-  button.primary{background:var(--primary);border-color:var(--primary);color:#fff}
-  button.primary:hover{background:#2550c4;color:#fff}
-  button:disabled{opacity:.4;cursor:not-allowed}
-  .chip{display:inline-block;padding:2px 10px;border-radius:999px;font-size:12px;border:1px solid var(--border);color:var(--sub);background:#fff}
-  .chip.ok{background:var(--ok-soft);color:var(--ok);border-color:transparent}
-  .chip.bad{background:var(--bad-soft);color:var(--bad);border-color:transparent}
-  .chip.blue{background:var(--primary-soft);color:var(--primary);border-color:transparent}
-  .card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:18px 20px;margin-bottom:16px}
-  .row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-  .row .grow{flex:1}
-  .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px;vertical-align:middle}
-  .dot.ok{background:var(--ok)} .dot.bad{background:var(--bad)} .dot.unknown{background:#C4CCDC}
-  .h-name{font-size:16px;font-weight:600}
-  code{background:#F0F3FA;padding:1px 6px;border-radius:4px;font-family:Consolas,monospace;font-size:12px}
-  .kv{font-size:12.5px;color:var(--sub);margin-top:10px;display:flex;flex-direction:column;gap:4px}
-  .kv b{color:var(--text);font-weight:600}
-  .frame-wrap{border:1px solid var(--border);border-radius:10px;overflow:hidden;background:#fff}
-  iframe{display:block;width:100%;height:calc(100vh - 250px);min-height:480px;border:0}
-  #toast{position:fixed;right:20px;bottom:20px;display:flex;flex-direction:column;gap:8px;z-index:99}
-  .toast{background:#1C2433;color:#fff;padding:9px 16px;border-radius:8px;font-size:13px;box-shadow:0 4px 16px rgba(0,0,0,.18);max-width:420px;word-break:break-all}
-  .toast.err{background:var(--bad)}
-</style>
+<title>LLM Key Hub · DeepSeek Harness</title>
+<link rel="stylesheet" href="/static/hub.css?v=2">
 </head>
 <body>
+<aside class="sidebar">
+  <div class="side-brand">LLM Key Hub<small>本地大模型钥匙管理</small></div>
+  <nav class="side-nav">
+    <a href="/harness" class="on"><span class="ico">◆</span>DeepSeek Harness</a>
+    <a href="/"><span class="ico">▦</span>渠道管理</a>
+    <a href="/monitor"><span class="ico">≡</span>调用监控</a>
+  </nav>
+  <div class="side-foot">仅监听本机回环<br>http://127.0.0.1:8787</div>
+</aside>
+<div class="main">
 <div class="wrap">
   <div class="topbar">
-    <div class="title">LLM Key Hub<small>DeepSeek Harness 智能体 · 另一个窗口</small></div>
-    <div class="navtabs">
-      <a href="/">渠道管理</a>
-      <a href="/monitor">调用监控</a>
-      <a href="/harness" class="on">Harness 智能体</a>
+    <div class="title">DeepSeek Harness<small>智能体 · 另一个窗口</small></div>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <span class="h-name">模型选择</span>
+      <select id="modelSel" class="model-sel" onchange="pickModel()"></select>
+      <span id="modelChip" class="chip blue">…</span>
+    </div>
+    <div class="kv">
+      <span><b>Auto</b> = Hub 跨渠道免费额度轮询（号池内已勾选的可对话模型，按排序逐个尝试）；<b>单选</b> = 全部请求固定走该模型，切回 Auto 即恢复轮询。</span>
+      <span>可选项来自渠道管理号池中<b>已勾选</b>的模型；注意单选对一切经 Hub 的 <code>model=auto</code> 请求生效（dsh 及其他用 auto 的客户端）。</span>
     </div>
   </div>
 
@@ -68,9 +45,8 @@
     </div>
     <div class="kv">
       <span>地址：<code id="stUrl">http://127.0.0.1:3080/</code>（仅本机）</span>
-      <span>模型出口：provider <code>llm-hub</code> → <code>http://127.0.0.1:8787/v1</code>，默认模型 <code>auto</code>（Hub 跨渠道免费额度轮动 + 试用完即停保护）</span>
+      <span>模型出口：provider <code>llm-hub</code> → <code>http://127.0.0.1:8787/v1</code>，默认模型 <code>auto</code>（受上方模型选择控制）</span>
       <span>配置文件：<code id="stPath">~/.dsh/settings.yaml</code> <span id="stCfg" class="chip">…</span></span>
-      <span>提示：在 Harness 设置 → Models 里点「获取可用模型」可拉取 Hub 全量模型清单；改模型即时生效，无需重启。</span>
     </div>
   </div>
 
@@ -78,11 +54,15 @@
     <iframe id="dshFrame" src="about:blank" title="DeepSeek Harness Web UI"></iframe>
   </div>
 </div>
+</div>
 <div id="toast"></div>
 
 <script>
 let STATE = {running: false, url: 'http://127.0.0.1:3080/'};
+let MODEL_STATE = {model: 'auto', options: []};
+let _modelSig = '';
 const $ = s => document.querySelector(s);
+const esc = s => String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
 function toast(msg, isErr){
   const t = document.createElement('div');
@@ -96,7 +76,11 @@ async function api(path, method, body){
   const opt = {method: method||'GET', headers:{'Content-Type':'application/json'}};
   if(body !== undefined) opt.body = JSON.stringify(body);
   const r = await fetch(path, opt);
-  if(!r.ok){ throw new Error('HTTP ' + r.status); }
+  if(!r.ok){
+    let msg = 'HTTP ' + r.status;
+    try{ const j = await r.json(); msg = (j.error && j.error.message) || j.message || j.detail || msg; }catch(e){}
+    throw new Error(msg);
+  }
   return await r.json();
 }
 
@@ -120,6 +104,47 @@ function render(st){
     $('#frameCard').style.display = 'block';
   }else{
     $('#frameCard').style.display = 'none';
+  }
+}
+
+function renderModelSel(){
+  const m = MODEL_STATE;
+  const sig = JSON.stringify([m.model, (m.options||[]).map(o=>[o.provider_id, o.models.length, o.models.join(',')])]);
+  if(sig === _modelSig) return;
+  _modelSig = sig;
+  const sel = $('#modelSel');
+  let html = '<option value="auto">Auto（自动轮询）</option>';
+  (m.options||[]).forEach(o => {
+    html += '<optgroup label="' + esc(o.provider_name) + '">' +
+      o.models.map(x => '<option value="' + esc(x) + '">' + esc(x) + '</option>').join('') +
+      '</optgroup>';
+  });
+  sel.innerHTML = html;
+  sel.value = m.model || 'auto';
+  if(sel.value !== (m.model || 'auto')){ sel.value = 'auto'; }
+  const cur = sel.value;
+  $('#modelChip').textContent = cur === 'auto' ? 'Auto · 自动轮询' : '锁定 · ' + cur;
+  $('#modelChip').className = 'chip ' + (cur === 'auto' ? 'blue' : 'warn');
+}
+
+async function refreshModel(){
+  try{
+    MODEL_STATE = await api('/api/harness/model');
+    renderModelSel();
+  }catch(e){ /* 下轮再试 */ }
+}
+
+async function pickModel(){
+  const v = $('#modelSel').value;
+  try{
+    const r = await api('/api/harness/model', 'POST', {model: v});
+    toast(r.model === 'auto' ? '已切回 Auto：跨渠道免费额度轮询' : '已锁定模型：' + r.model);
+    MODEL_STATE.model = r.model;
+    _modelSig = '';
+    renderModelSel();
+  }catch(e){
+    toast('切换失败：' + e.message, true);
+    await refreshModel();
   }
 }
 
@@ -158,7 +183,9 @@ async function stopDsh(){
 }
 
 refresh();
+refreshModel();
 setInterval(refresh, 10000);
+setInterval(refreshModel, 15000);
 </script>
 </body>
 </html>

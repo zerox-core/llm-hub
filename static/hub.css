@@ -1,0 +1,132 @@
+/* LLM Key Hub 共享样式 · 黑色主题（与 DeepSeek Harness 相照应） */
+:root{
+  --bg:#0B0E14; --panel:#10141C; --card:#151B26; --card2:#1A2130;
+  --border:#242C3C; --border-soft:#1B2230;
+  --text:#E7EAF2; --sub:#8B93A7;
+  --primary:#4C8DFF; --primary-soft:rgba(76,141,255,.15);
+  --ok:#34D399; --ok-soft:rgba(52,211,153,.13);
+  --warn:#F5A524; --warn-soft:rgba(245,165,36,.13);
+  --bad:#F0556B; --bad-soft:rgba(240,85,107,.13);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:"Noto Sans SC","PingFang SC","Microsoft YaHei",-apple-system,sans-serif;font-size:14px;line-height:1.6}
+a{color:var(--primary)}
+code{background:#1E2532;padding:1px 6px;border-radius:4px;font-family:Consolas,monospace;font-size:12px;color:#C9D4EA}
+
+/* ---------- 侧边栏 ---------- */
+.sidebar{position:fixed;left:0;top:0;bottom:0;width:216px;background:var(--panel);border-right:1px solid var(--border-soft);display:flex;flex-direction:column;z-index:10}
+.side-brand{padding:20px 18px 14px;font-size:16px;font-weight:700;letter-spacing:.5px}
+.side-brand small{display:block;font-size:11px;color:var(--sub);font-weight:400;margin-top:3px;letter-spacing:0}
+.side-nav{display:flex;flex-direction:column;gap:2px;padding:8px 10px}
+.side-nav a{display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:8px;color:var(--sub);text-decoration:none;font-size:13.5px;transition:all .12s}
+.side-nav a:hover{color:var(--text);background:rgba(255,255,255,.045)}
+.side-nav a.on{color:var(--primary);background:var(--primary-soft);font-weight:600}
+.side-nav a .ico{width:18px;text-align:center;font-size:13px;opacity:.9}
+.side-foot{margin-top:auto;padding:14px 18px;font-size:11px;color:var(--sub);border-top:1px solid var(--border-soft);line-height:1.7}
+.main{margin-left:216px;min-height:100vh}
+.wrap{max-width:1180px;margin:0 auto;padding:24px 26px 80px}
+
+/* ---------- 顶栏与通用组件 ---------- */
+.topbar{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;flex-wrap:wrap;gap:12px}
+.title{font-size:20px;font-weight:700;letter-spacing:.5px}
+.title small{font-size:12px;color:var(--sub);font-weight:400;margin-left:10px}
+.topbar .actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+button{cursor:pointer;border:1px solid var(--border);background:var(--card2);color:var(--text);
+  border-radius:8px;padding:6px 14px;font-size:13px;font-family:inherit;transition:all .15s}
+button:hover{border-color:var(--primary);color:var(--primary)}
+button.primary{background:var(--primary);border-color:var(--primary);color:#fff}
+button.primary:hover{background:#3a7bf0;color:#fff}
+button.small{padding:2px 10px;font-size:12px;border-radius:6px}
+button.tiny{padding:0 6px;font-size:12px;border-radius:5px;line-height:1.5}
+button.danger:hover{border-color:var(--bad);color:var(--bad)}
+button:disabled{opacity:.4;cursor:not-allowed}
+select,input[type=text],input:not([type]){background:var(--card2);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:6px 10px;font-size:13px;font-family:inherit}
+select:focus,input:focus{outline:none;border-color:var(--primary)}
+.chip{display:inline-block;padding:2px 10px;border-radius:999px;font-size:12px;border:1px solid var(--border);color:var(--sub);background:var(--card2)}
+.chip.ok{background:var(--ok-soft);color:var(--ok);border-color:transparent}
+.chip.warn{background:var(--warn-soft);color:var(--warn);border-color:transparent}
+.chip.bad{background:var(--bad-soft);color:var(--bad);border-color:transparent}
+.chip.blue{background:var(--primary-soft);color:var(--primary);border-color:transparent}
+.card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:18px 20px;margin-bottom:16px}
+.card.collapsed{padding:12px 20px}
+.row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.grow{flex:1}
+.sec-title{font-size:13px;font-weight:600;color:var(--sub);margin:22px 0 10px}
+.empty{color:var(--sub);text-align:center;padding:40px 0;font-size:13px}
+
+/* ---------- 号池 ---------- */
+.pool-block{margin-bottom:22px}
+.pool-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 10px;padding:0 2px}
+.pool-name{font-size:15px;font-weight:700}
+.pool-name::before{content:"▸ ";color:var(--primary)}
+.poolsel{max-width:150px;padding:2px 8px;font-size:12px}
+.wb-card{border-style:dashed;opacity:.92}
+
+/* ---------- 渠道卡片 ---------- */
+.p-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.p-name{font-size:16px;font-weight:600}
+.p-active{font-size:12px;color:var(--sub)}
+.p-active b{color:var(--primary);font-weight:600}
+.p-meta{font-size:12px;color:var(--sub);display:flex;gap:16px;flex-wrap:wrap;margin:10px 0;align-items:center}
+.p-ops{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;align-items:center}
+.paid-box{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--sub);border:1px solid var(--border);border-radius:6px;padding:3px 10px;cursor:pointer;user-select:none;background:var(--card2)}
+.paid-box.on{color:var(--warn);border-color:var(--warn);background:var(--warn-soft)}
+.paid-box input{cursor:pointer;accent-color:var(--primary)}
+.order-hint{font-size:12px;color:var(--sub);margin-bottom:6px}
+
+/* ---------- 模型表格 ---------- */
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;color:var(--sub);font-weight:500;font-size:12px;padding:6px 8px;border-bottom:1px solid var(--border)}
+td{padding:7px 8px;border-bottom:1px solid var(--border-soft);vertical-align:middle}
+tr:last-child td{border-bottom:none}
+tr.current td{background:var(--primary-soft)}
+tr.mdis td{opacity:.42}
+.model-id{font-family:Consolas,monospace;font-size:12.5px}
+.mchk{cursor:pointer;accent-color:var(--primary);width:14px;height:14px;vertical-align:middle}
+.quota-bar{width:90px;height:6px;background:#232A38;border-radius:3px;overflow:hidden;display:inline-block;vertical-align:middle;margin-right:6px}
+.quota-bar i{display:block;height:100%;background:var(--ok);border-radius:3px}
+.quota-bar i.warn{background:var(--warn)}
+.quota-bar i.bad{background:var(--bad)}
+.q-num{font-size:12px;color:var(--sub)}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px;vertical-align:middle}
+.dot.ok{background:var(--ok)} .dot.bad{background:var(--bad)} .dot.unknown{background:#4A5468}
+.cat{margin-top:6px;border:1px solid var(--border-soft);border-radius:8px;overflow:hidden}
+.cat > summary{padding:7px 12px;font-size:13px;font-weight:600;color:var(--text);cursor:pointer;background:#181E2A;user-select:none;list-style:none}
+.cat > summary::-webkit-details-marker{display:none}
+.cat > summary .cnt{color:var(--sub);font-weight:400;font-size:12px;margin-left:6px}
+.cat > summary::before{content:"▸ ";color:var(--sub)}
+.cat[open] > summary::before{content:"▾ "}
+.cat table{border-top:1px solid var(--border-soft)}
+
+/* ---------- 表单 / 面板 ---------- */
+.add-panel{display:none}
+.add-panel.open{display:block}
+.form-row{display:flex;gap:12px;margin-bottom:12px;flex-wrap:wrap}
+.form-item{flex:1;min-width:200px}
+.form-item label{display:block;font-size:12px;color:var(--sub);margin-bottom:4px}
+.form-item input,.form-item select{width:100%;padding:7px 10px}
+.kv{font-size:12.5px;color:var(--sub);margin-top:10px;display:flex;flex-direction:column;gap:4px}
+.kv b{color:var(--text);font-weight:600}
+.h-name{font-size:16px;font-weight:600}
+
+/* ---------- 反重力额度 ---------- */
+.quota-line{font-size:12px;color:var(--sub)}
+.ag-quota{margin:8px 0;padding:8px 10px;border:1px solid var(--border-soft);border-radius:8px;background:#131926}
+.ag-quota .quota-line{display:flex;align-items:center;gap:6px;margin:3px 0;flex-wrap:wrap}
+.ag-quota .ag-wname{display:inline-block;min-width:64px;color:var(--sub)}
+.ag-group{border-top:1px dashed var(--border-soft);margin-top:4px;padding-top:2px}
+details.raw{margin-top:8px}
+details.raw summary{font-size:12px;color:var(--sub);cursor:pointer}
+details.raw pre{background:#131926;border:1px solid var(--border);border-radius:8px;padding:10px;font-size:11px;max-height:260px;overflow:auto;white-space:pre-wrap;word-break:break-all;color:#A9B4CA}
+.maskbtn{font-size:11px;color:var(--sub);background:none;border:none;padding:0 4px;text-decoration:underline}
+.maskbtn:hover{color:var(--primary)}
+
+/* ---------- Harness 页 ---------- */
+.frame-wrap{border:1px solid var(--border);border-radius:10px;overflow:hidden;background:#000}
+iframe{display:block;width:100%;height:calc(100vh - 320px);min-height:480px;border:0}
+.model-sel{min-width:280px;max-width:420px}
+
+/* ---------- Toast ---------- */
+#toast{position:fixed;right:20px;bottom:20px;display:flex;flex-direction:column;gap:8px;z-index:99}
+.toast{background:#232C3E;color:#fff;padding:9px 16px;border-radius:8px;font-size:13px;box-shadow:0 4px 16px rgba(0,0,0,.45);max-width:420px;word-break:break-all;border:1px solid #2E3950}
+.toast.err{background:var(--bad);border-color:var(--bad)}

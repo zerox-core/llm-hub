@@ -3,61 +3,25 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>调用监控 · LLM Key Hub</title>
-<style>
-  :root{
-    --bg:#F4F6FB; --card:#FFFFFF; --border:#E3E8F2; --text:#121722; --sub:#6D778C;
-    --primary:#2F5DDF; --primary-soft:#EAF0FE; --ok:#1FA36B; --ok-soft:#E6F7EF;
-    --warn:#C77F1A; --warn-soft:#FCF3E3; --bad:#D94460; --bad-soft:#FCEAEE;
-  }
-  *{box-sizing:border-box;margin:0;padding:0}
-  body{background:var(--bg);color:var(--text);font-family:"Noto Sans SC","PingFang SC","Microsoft YaHei",-apple-system,sans-serif;font-size:14px;line-height:1.6}
-  .wrap{max-width:1080px;margin:0 auto;padding:24px 20px 80px}
-  .topbar{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;flex-wrap:wrap;gap:12px}
-  .title{font-size:20px;font-weight:700;letter-spacing:.5px}
-  .title small{font-size:12px;color:var(--sub);font-weight:400;margin-left:10px}
-  .navtabs{display:flex;gap:4px}
-  .navtabs a{padding:5px 14px;border-radius:8px;font-size:13px;color:var(--sub);text-decoration:none;border:1px solid transparent}
-  .navtabs a.on{background:var(--primary-soft);color:var(--primary);font-weight:600}
-  .navtabs a:hover{border-color:var(--border);color:var(--primary)}
-  button{cursor:pointer;border:1px solid var(--border);background:var(--card);color:var(--text);
-    border-radius:8px;padding:6px 14px;font-size:13px;font-family:inherit;transition:all .15s}
-  button:hover{border-color:var(--primary);color:var(--primary)}
-  button.small{padding:2px 10px;font-size:12px;border-radius:6px}
-  button.danger:hover{border-color:var(--bad);color:var(--bad)}
-  .chip{display:inline-block;padding:2px 10px;border-radius:999px;font-size:12px;border:1px solid var(--border);color:var(--sub);background:#fff}
-  .chip.ok{background:var(--ok-soft);color:var(--ok);border-color:transparent}
-  .chip.bad{background:var(--bad-soft);color:var(--bad);border-color:transparent}
-  .chip.blue{background:var(--primary-soft);color:var(--primary);border-color:transparent}
-  .card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:18px 20px;margin-bottom:16px}
-  .p-meta{font-size:12px;color:var(--sub);display:flex;gap:16px;flex-wrap:wrap;margin:10px 0;align-items:center}
-  .p-ops{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;align-items:center}
-  .paid-box{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--sub);border:1px solid var(--border);border-radius:6px;padding:3px 10px;cursor:pointer;user-select:none}
-  .paid-box input{cursor:pointer}
-  table{width:100%;border-collapse:collapse;font-size:13px}
-  th{text-align:left;color:var(--sub);font-weight:500;font-size:12px;padding:6px 8px;border-bottom:1px solid var(--border)}
-  td{padding:7px 8px;border-bottom:1px solid #F0F3FA;vertical-align:middle}
-  tr:last-child td{border-bottom:none}
-  .model-id{font-family:Consolas,monospace;font-size:12.5px}
-  .q-num{font-size:12px;color:var(--sub)}
-  .sec-title{font-size:13px;font-weight:600;color:var(--sub);margin:22px 0 10px}
-  #toast{position:fixed;right:20px;bottom:20px;display:flex;flex-direction:column;gap:8px;z-index:99}
-  .toast{background:#1C2433;color:#fff;padding:9px 16px;border-radius:8px;font-size:13px;box-shadow:0 4px 16px rgba(0,0,0,.18);max-width:420px;word-break:break-all}
-  .toast.err{background:var(--bad)}
-</style>
+<title>LLM Key Hub · 调用监控</title>
+<link rel="stylesheet" href="/static/hub.css?v=2">
 </head>
 <body>
+<aside class="sidebar">
+  <div class="side-brand">LLM Key Hub<small>本地大模型钥匙管理</small></div>
+  <nav class="side-nav">
+    <a href="/harness"><span class="ico">◆</span>DeepSeek Harness</a>
+    <a href="/"><span class="ico">▦</span>渠道管理</a>
+    <a href="/monitor" class="on"><span class="ico">≡</span>调用监控</a>
+  </nav>
+  <div class="side-foot">仅监听本机回环<br>http://127.0.0.1:8787</div>
+</aside>
+<div class="main">
 <div class="wrap">
   <div class="topbar">
-    <div class="title">LLM Key Hub<small>调用监控（仅本机 127.0.0.1）</small></div>
-    <div class="navtabs">
-      <a href="/">渠道管理</a>
-      <a href="/monitor" class="on">调用监控</a>
-      <a href="/harness">Harness 智能体</a>
-    </div>
+    <div class="title">调用监控<small>经 Hub 轮询代理与页面测试的每一次调用 · 只记录，不做费用估计</small></div>
   </div>
 
-  <div class="sec-title">经 Hub 轮询代理与页面测试的每一次调用 · 只记录，不做费用估计</div>
   <div class="card">
     <div id="logStats" class="p-meta" style="margin:0 0 8px">暂无调用记录</div>
     <div id="logModels"></div>
@@ -68,6 +32,7 @@
     </div>
     <div id="logRows"></div>
   </div>
+</div>
 </div>
 <div id="toast"></div>
 
