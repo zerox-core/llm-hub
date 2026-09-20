@@ -103,7 +103,9 @@
     </div>
     <div class="actions">
       <span id="quotaChip" class="chip">百炼额度：未同步</span>
+      <span id="hubUrlChip" class="chip" style="cursor:pointer" title="Hub 统一入口 URL（OpenAI 兼容 /v1），点击复制" onclick="copyHubUrl()">URL：…</span>
       <span id="hubKeyChip" class="chip" style="cursor:pointer" title="Hub 统一入口 key（/v1 接口鉴权用），点击复制完整 key" onclick="copyHubKey()">Hub Key：…</span>
+      <button onclick="copyClaudeCode()">Claude Code 配置</button>
       <button onclick="toggleFreetier()">试用完即停：开启</button>
       <button id="authBtn" onclick="startBlAuth()">授权百炼控制台</button>
       <button id="agBtn" onclick="startAgAuth()">授权反重力 Google</button>
@@ -450,6 +452,7 @@ function render(){
   // Hub 统一 key
   const hk = STATE.hub_key || '';
   $('#hubKeyChip').textContent = 'Hub Key：' + (hk ? hk.slice(0,9) + '…' + hk.slice(-3) : '未生成');
+  $('#hubUrlChip').textContent = 'URL：' + (STATE.hub_base || '127.0.0.1:8787/v1');
   // 额度区
   const q = STATE.quota || {};
   const entries = q.entries || {};
@@ -509,6 +512,21 @@ function copyHubKey(){
   if(!STATE.hub_key){ toast('Hub key 未生成', true); return; }
   cp(STATE.hub_key);
   toast('已复制 Hub 统一 key（/v1 接口鉴权用）');
+}
+
+function copyHubUrl(){
+  cp(STATE.hub_base || 'http://127.0.0.1:8787/v1');
+  toast('已复制统一入口 URL（OpenAI 兼容 /v1）');
+}
+
+function copyClaudeCode(){
+  const cfg = 'ANTHROPIC_BASE_URL=http://127.0.0.1:8787' +
+    '
+ANTHROPIC_AUTH_TOKEN=' + (STATE.hub_key || '(见顶栏 Hub Key)') +
+    '
+# Claude Code 走 /v1/messages 适配层；model 名不在渠道里时 Hub 自动落到 auto 跨渠道轮动';
+  cp(cfg);
+  toast('已复制 Claude Code 环境变量配置');
 }
 
 function copyHub(pid){

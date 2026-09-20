@@ -1315,6 +1315,313 @@ async def _forward_stream(p, body, model, model_requested=None):
                              headers={"X-Hub-Model": model})
 
 
+# ---------------- Claude Code 适配（Anthropic Messages API） ----------------
+
+def _require_hub_key_anth(d, req):
+    key = get_hub_key(d)
+    auth = req.headers.get("authorization") or ""
+    xkey = req.headers.get("x-api-key") or ""
+    if auth != "Bearer " + key and xkey != key:
+        raise HTTPException(status_code=401, detail={
+            "type": "error", "error": {"type": "authentication_error",
+            "message": "invalid x-api-key / bearer token（用 Hub 统一 key，见面板顶栏）"}})
+
+
+def _anth_to_openai(body):
+    """Anthropic Messages 请求 -> OpenAI chat.completions 请求"""
+    msgs = []
+    sys = body.get("system")
+    if isinstance(sys, str) and sys:
+        msgs.append({"role": "system", "content": sys})
+    elif isinstance(sys, list):
+        txt = "".join(b.get("text", "") for b in sys if isinstance(b, dict) and b.get("type") == "text")
+        if txt:
+            msgs.append({"role": "system", "content": txt})
+    for m in body.get("messages") or []:
+        role = m.get("role") or "user"
+        c = m.get("content")
+        if isinstance(c, str):
+            msgs.append({"role": role, "content": c})
+            continue
+        texts, tool_calls, tool_results = [], [], []
+        for b in c or []:
+            if not isinstance(b, dict):
+                continue
+            t = b.get("type")
+            if t == "text":
+                texts.append(b.get("text", ""))
+            elif t == "tool_use":
+                tool_calls.append({"id": b.get("id") or ("call_" + uuid.uuid4().hex[:16]),
+                                   "type": "function",
+                                   "function": {"name": b.get("name"),
+                                                "arguments": json.dumps(b.get("input") or {}, ensure_ascii=False)}})
+            elif t == "tool_result":
+                tool_results.append(b)
+        for tr in tool_results:
+            cont = tr.get("content")
+            if isinstance(cont, list):
+                cont = "".join(x.get("text", "") for x in cont if isinstance(x, dict) and x.get("type") == "text")
+            msgs.append({"role": "tool",
+                         "tool_call_id": tr.get("tool_use_id") or "",
+                         "content": cont if isinstance(cont, str) else json.dumps(cont, ensure_ascii=False)})
+        if texts or tool_calls:
+            msg = {"role": role, "content": "\n".join(texts) if texts else None}
+            if tool_calls:
+                msg["tool_calls"] = tool_calls
+            msgs.append(msg)
+    out = {"model": body.get("model") or "auto", "messages": msgs,
+           "stream": bool(body.get("stream"))}
+    if body.get("max_tokens"):
+        out["max_tokens"] = body["max_tokens"]
+    if body.get("temperature") is not None:
+        out["temperature"] = body["temperature"]
+    if body.get("top_p") is not None:
+        out["top_p"] = body["top_p"]
+    if body.get("stop_sequences"):
+        out["stop"] = body["stop_sequences"]
+    tools = body.get("tools")
+    if tools:
+        out["tools"] = [{"type": "function",
+                         "function": {"name": t.get("name"),
+                                      "description": t.get("description") or "",
+                                      "parameters": t.get("input_schema") or {"type": "object", "properties": {}}}}
+                        for t in tools]
+        tc = body.get("tool_choice")
+        if isinstance(tc, dict):
+            if tc.get("type") == "tool":
+                out["tool_choice"] = {"type": "function", "function": {"name": tc.get("name")}}
+            elif tc.get("type") == "any":
+                out["tool_choice"] = "required"
+            elif tc.get("type") == "auto":
+                out["tool_choice"] = "auto"
+    return out
+
+
+def _openai_to_anth(resp, model):
+    """OpenAI chat.completions 响应 -> Anthropic Messages 响应"""
+    ch = (resp.get("choices") or [{}])[0]
+    msg = ch.get("message") or {}
+    content = []
+    if msg.get("content"):
+        content.append({"type": "text", "text": msg["content"]})
+    for tc in msg.get("tool_calls") or []:
+        fn = tc.get("function") or {}
+        try:
+            args = json.loads(fn.get("arguments") or "{}")
+        except Exception:
+            args = {}
+        content.append({"type": "tool_use", "id": tc.get("id") or ("toolu_" + uuid.uuid4().hex[:16]),
+                        "name": fn.get("name"), "input": args})
+    fr = ch.get("finish_reason")
+    stop_reason = {"stop": "end_turn", "length": "max_tokens",
+                   "tool_calls": "tool_use", "content_filter": "refusal"}.get(fr, "end_turn")
+    u = resp.get("usage") or {}
+    return {"id": resp.get("id") or ("msg_" + uuid.uuid4().hex[:24]),
+            "type": "message", "role": "assistant", "content": content,
+            "model": model, "stop_reason": stop_reason, "stop_sequence": None,
+            "usage": {"input_tokens": u.get("prompt_tokens") or 0,
+                      "output_tokens": u.get("completion_tokens") or 0}}
+
+
+def _anth_err(status, message):
+    return JSONResponse(status_code=status,
+                        content={"type": "error", "error": {"type": "api_error", "message": message}})
+
+
+async def _anth_forward_stream(p, body, model, model_requested):
+    """流式：上游 OpenAI SSE -> Anthropic SSE 事件序列"""
+    b = dict(body)
+    b["model"] = model
+    b["stream"] = True
+    headers = {"Authorization": "Bearer " + p["api_key"], "Content-Type": "application/json"}
+    url = p["base_url"].rstrip("/") + "/chat/completions"
+    t0 = time.time()
+    client = httpx.AsyncClient(timeout=httpx.Timeout(180.0, connect=20.0), trust_env=False)
+    request = client.build_request("POST", url, json=b, headers=headers)
+    resp = await client.send(request, stream=True)
+
+    async def gen():
+        msg_id = "msg_" + uuid.uuid4().hex[:24]
+        blocks = {}          # 打开的块: "text" / "tcN" -> anth 块 index
+        block_open = None
+        next_idx = 0
+        stop_reason = "end_turn"
+        out_tokens = 0
+
+        def sse(ev, data):
+            return ("event: %s\ndata: %s\n\n" % (ev, json.dumps(data, ensure_ascii=False))).encode()
+
+        try:
+            if resp.status_code != 200:
+                raw = await resp.aread()
+                yield sse("error", {"type": "error", "error": {"type": "api_error",
+                          "message": "upstream HTTP %d: %s" % (resp.status_code, raw[:300].decode("utf-8", "replace"))}})
+                return
+            yield sse("message_start", {"type": "message_start", "message": {
+                "id": msg_id, "type": "message", "role": "assistant", "content": [],
+                "model": model_requested or model, "stop_reason": None, "stop_sequence": None,
+                "usage": {"input_tokens": 0, "output_tokens": 0}}})
+            async for line in resp.aiter_lines():
+                if not line.startswith("data:"):
+                    continue
+                payload = line[5:].strip()
+                if not payload or payload == "[DONE]":
+                    if payload == "[DONE]":
+                        break
+                    continue
+                try:
+                    chunk = json.loads(payload)
+                except Exception:
+                    continue
+                if isinstance(chunk.get("usage"), dict):
+                    out_tokens = chunk["usage"].get("completion_tokens") or out_tokens
+                ch = (chunk.get("choices") or [{}])[0]
+                delta = ch.get("delta") or {}
+                fr = ch.get("finish_reason")
+                txt = delta.get("content")
+                if txt:
+                    if block_open != "text":
+                        if block_open is not None:
+                            yield sse("content_block_stop", {"type": "content_block_stop", "index": blocks[block_open]})
+                        blocks["text"] = next_idx
+                        next_idx += 1
+                        block_open = "text"
+                        yield sse("content_block_start", {"type": "content_block_start",
+                                  "index": blocks["text"], "content_block": {"type": "text", "text": ""}})
+                    yield sse("content_block_delta", {"type": "content_block_delta",
+                              "index": blocks["text"], "delta": {"type": "text_delta", "text": txt}})
+                for tc in delta.get("tool_calls") or []:
+                    key = "tc%d" % (tc.get("index") or 0)
+                    fn = tc.get("function") or {}
+                    if key not in blocks:
+                        if block_open is not None:
+                            yield sse("content_block_stop", {"type": "content_block_stop", "index": blocks[block_open]})
+                        blocks[key] = next_idx
+                        next_idx += 1
+                        block_open = key
+                        yield sse("content_block_start", {"type": "content_block_start",
+                                  "index": blocks[key],
+                                  "content_block": {"type": "tool_use",
+                                                    "id": tc.get("id") or ("toolu_" + uuid.uuid4().hex[:16]),
+                                                    "name": fn.get("name") or "", "input": {}}})
+                    if fn.get("arguments"):
+                        yield sse("content_block_delta", {"type": "content_block_delta",
+                                  "index": blocks[key],
+                                  "delta": {"type": "input_json_delta", "partial_json": fn["arguments"]}})
+                if fr:
+                    stop_reason = {"stop": "end_turn", "length": "max_tokens",
+                                   "tool_calls": "tool_use", "content_filter": "refusal"}.get(fr, "end_turn")
+            if block_open is not None:
+                yield sse("content_block_stop", {"type": "content_block_stop", "index": blocks[block_open]})
+            yield sse("message_delta", {"type": "message_delta",
+                      "delta": {"stop_reason": stop_reason, "stop_sequence": None},
+                      "usage": {"output_tokens": out_tokens}})
+            yield sse("message_stop", {"type": "message_stop"})
+        finally:
+            ms = int((time.time() - t0) * 1000)
+            log_call({"source": "proxy-anthropic", "provider": p.get("name"),
+                      "model_requested": model_requested or model, "model_used": model,
+                      "ok": resp.status_code == 200, "status": resp.status_code,
+                      "latency_ms": ms, "stream": True,
+                      "error": None if resp.status_code == 200 else "stream HTTP %d" % resp.status_code})
+            await resp.aclose()
+            await client.aclose()
+
+    return StreamingResponse(gen(), status_code=200, media_type="text/event-stream",
+                             headers={"X-Hub-Model": model, "X-Hub-Provider": p.get("id")})
+
+
+@app.post("/v1/messages")
+async def anth_messages(req: Request):
+    """Claude Code / Anthropic Messages API 统一入口。
+    鉴权：x-api-key 或 Authorization: Bearer（均为 Hub 统一 key）。
+    model 不在任何渠道列表时自动落到 auto（跨渠道轮动）；支持 tools / system / 流式。"""
+    body = await req.json()
+    d = load_data()
+    _require_hub_key_anth(d, req)
+    model = body.get("model") or "auto"
+    if find_model_provider(d, model) is None:
+        model = "auto"
+    obody = _anth_to_openai(body)
+    obody["model"] = model
+    stream = obody["stream"]
+
+    if req.headers.get("x-hub-provider"):
+        p = _pick_provider(d, req)
+        scoped = [(p, m) for m in (chat_candidates(d, p) if model == "auto" else [model])]
+    elif model == "auto":
+        scoped = all_chat_candidates(d)
+    else:
+        p = find_model_provider(d, model)
+        scoped = [(p, model)]
+    if not scoped:
+        log_call({"source": "proxy-anthropic", "provider": None,
+                  "model_requested": model, "model_used": None,
+                  "ok": False, "blocked": True, "latency_ms": 0,
+                  "error": "没有可调用的免费额度模型"})
+        return _anth_err(403, "没有可调用的免费额度模型（全部无额度/耗尽/过期）。")
+    if model != "auto":
+        p0 = scoped[0][0]
+        if is_ag_provider(p0):
+            agst, _r5, _rw, cd = ag_group_state(d, model)
+            if agst in ("empty", "cooldown"):
+                gname = AG_GROUP_TITLES.get(ag_model_group(model), "额度组")
+                msg = ("%s额度已耗尽，正在冷却至 %s" % (gname, cd)) if agst == "cooldown" else                       ("%s的 5 小时 / 每周额度已耗尽，等待重置后自动恢复" % gname)
+                log_call({"source": "proxy-anthropic", "provider": p0.get("name"),
+                          "model_requested": model, "model_used": model,
+                          "ok": False, "blocked": True, "latency_ms": 0,
+                          "error": "AG 组额度拦截：" + msg})
+                return _anth_err(429, "模型 %s 所属%s。" % (model, msg))
+
+    if stream:
+        p0, m0 = scoped[0]
+        return await _anth_forward_stream(p0, obody, m0, model)
+
+    last = None
+    first_model = scoped[0][1]
+    for p, m in scoped:
+        code, resp, ms = await _forward_chat(p, obody, m)
+        usage = resp.get("usage") if code == 200 and isinstance(resp, dict) else None
+        u = usage or {}
+        log_call({"source": "proxy-anthropic", "provider": p.get("name"),
+                  "model_requested": body.get("model") or "auto", "model_used": m,
+                  "ok": code == 200, "status": code, "latency_ms": ms,
+                  "prompt_tokens": u.get("prompt_tokens"),
+                  "completion_tokens": u.get("completion_tokens"),
+                  "total_tokens": u.get("total_tokens"),
+                  "rotated": (model == "auto" and m != first_model),
+                  "error": None if code == 200 else
+                           (json.dumps(resp, ensure_ascii=False)[:300] if isinstance(resp, dict) else str(resp)[:300])})
+        if code == 200:
+            return JSONResponse(content=_openai_to_anth(resp, m),
+                                headers={"X-Hub-Model": m, "X-Hub-Provider": p.get("id")})
+        last = (p, m, code, resp)
+        if not _quota_like(code, resp):
+            break
+    p, m, code, resp = last
+    emsg = ""
+    if isinstance(resp, dict):
+        emsg = (resp.get("error") or {}).get("message") or json.dumps(resp, ensure_ascii=False)
+    else:
+        emsg = str(resp)
+    return JSONResponse(status_code=code if 100 <= code <= 599 else 502,
+                        content={"type": "error", "error": {"type": "api_error",
+                                 "message": emsg[:500]}},
+                        headers={"X-Hub-Model": m, "X-Hub-Provider": p.get("id")})
+
+
+@app.post("/v1/messages/count_tokens")
+async def anth_count_tokens(req: Request):
+    """Claude Code 启动时探测用；按字符粗略估算（~4 字符 1 token）。"""
+    body = await req.json()
+    d = load_data()
+    _require_hub_key_anth(d, req)
+    n = len(json.dumps(body.get("messages") or [], ensure_ascii=False))
+    n += len(json.dumps(body.get("system") or "", ensure_ascii=False))
+    n += len(json.dumps(body.get("tools") or [], ensure_ascii=False))
+    return {"input_tokens": max(1, n // 4)}
+
+
 # ---------------- 调用监控（日志查询 / 统计 / 清空） ----------------
 
 @app.get("/api/logs")
