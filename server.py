@@ -383,11 +383,13 @@ def ordered_models(p):
     return out
 
 
-def chat_candidates(d, p):
-    """轮询候选：按排序，且（bailian 未允许付费时）必须有免费额度；仅保留可对话类别。"""
+def chat_candidates(d, p, extra_cats=None):
+    """轮询候选：按排序，且（bailian 未允许付费时）必须有免费额度；仅保留可对话类别。
+    extra_cats：额外放行的类别（仅 /v1/models 列表展示用，auto 轮询不传、不受影响）。"""
+    cats = CHAT_CATS | set(extra_cats or ())
     out = []
     for m in ordered_models(p):
-        if model_category(m) not in CHAT_CATS:
+        if model_category(m) not in cats:
             continue
         if p.get("type") == "bailian" and not p.get("allow_paid"):
             st, _ = quota_state(d, m)
@@ -1138,13 +1140,14 @@ def _require_hub_key(d, req):
 
 @app.get("/v1/models")
 def hub_models(req: Request):
-    """统一模型清单：auto + 各渠道可对话模型（供标准客户端拉列表，需 hub_key）。"""
+    """统一模型清单：auto + 各渠道可对话模型 + 图像生成模型（供标准客户端拉列表，需 hub_key）。
+    图像生成模型只在列表中可见、可显式指定调用；不进入 auto 轮询。"""
     d = load_data()
     _require_hub_key(d, req)
     data = [{"id": "auto", "object": "model", "owned_by": "llm-hub"}]
     seen = {"auto"}
     for p in d["providers"]:
-        for m in chat_candidates(d, p):
+        for m in chat_candidates(d, p, extra_cats={"图像生成"}):
             if m in seen:
                 continue
             seen.add(m)
