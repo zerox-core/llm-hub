@@ -14,7 +14,15 @@ a{color:var(--primary)}
 code{background:#1E2532;padding:1px 6px;border-radius:4px;font-family:Consolas,monospace;font-size:12px;color:#C9D4EA}
 
 /* ---------- 侧边栏 ---------- */
-.sidebar{position:fixed;left:0;top:0;bottom:0;width:216px;background:var(--panel);border-right:1px solid var(--border-soft);display:flex;flex-direction:column;z-index:10}
+.sidebar{position:fixed;left:0;top:0;bottom:0;width:216px;background:var(--panel);border-right:1px solid var(--border-soft);display:flex;flex-direction:column;z-index:10;transition:transform .18s ease}
+body.side-collapsed .sidebar{transform:translateX(-102%)}
+.side-brand-row{position:relative}
+.side-brand-row .side-toggle{position:absolute;top:18px;right:14px}
+.side-toggle{flex:none;width:26px;height:26px;border:1px solid var(--border);border-radius:7px;background:transparent;color:var(--sub);cursor:pointer;font-size:13px;line-height:1;display:flex;align-items:center;justify-content:center;padding:0}
+.side-toggle:hover{color:var(--text);border-color:var(--sub)}
+.side-expand{position:fixed;left:12px;top:12px;z-index:60;display:none;width:32px;height:32px;border:1px solid var(--border);border-radius:8px;background:rgba(16,20,28,.85);color:var(--sub);cursor:pointer;font-size:15px;align-items:center;justify-content:center;padding:0;backdrop-filter:blur(4px)}
+.side-expand:hover{color:var(--text);border-color:var(--sub)}
+body.side-collapsed .side-expand{display:flex}
 .side-brand{padding:20px 18px 14px;font-size:16px;font-weight:700;letter-spacing:.5px}
 .side-brand small{display:block;font-size:11px;color:var(--sub);font-weight:400;margin-top:3px;letter-spacing:0}
 .side-nav{display:flex;flex-direction:column;gap:2px;padding:8px 10px}
@@ -23,7 +31,8 @@ code{background:#1E2532;padding:1px 6px;border-radius:4px;font-family:Consolas,m
 .side-nav a.on{color:var(--primary);background:var(--primary-soft);font-weight:600}
 .side-nav a .ico{width:18px;text-align:center;font-size:13px;opacity:.9}
 .side-foot{margin-top:auto;padding:14px 18px;font-size:11px;color:var(--sub);border-top:1px solid var(--border-soft);line-height:1.7}
-.main{margin-left:216px;min-height:100vh}
+.main{margin-left:216px;min-height:100vh;transition:margin-left .18s ease}
+body.side-collapsed .main{margin-left:0}
 .wrap{max-width:1180px;margin:0 auto;padding:24px 26px 80px}
 
 /* ---------- 顶栏与通用组件 ---------- */
@@ -121,9 +130,19 @@ details.raw pre{background:#131926;border:1px solid var(--border);border-radius:
 .maskbtn{font-size:11px;color:var(--sub);background:none;border:none;padding:0 4px;text-decoration:underline}
 .maskbtn:hover{color:var(--primary)}
 
-/* ---------- Harness 页 ---------- */
-.frame-wrap{border:1px solid var(--border);border-radius:10px;overflow:hidden;background:#000}
-iframe{display:block;width:100%;height:calc(100vh - 320px);min-height:480px;border:0}
+/* ---------- Harness 页（dsh 全屏嵌入壳） ---------- */
+body.page-harness{overflow:hidden}
+body.page-harness .main{height:100vh}
+.frame-wrap{position:relative;width:100%;height:100vh;background:#000;overflow:hidden}
+.frame-wrap iframe{position:absolute;inset:0;width:100%;height:100%;border:0;display:block}
+.harness-down{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;color:var(--sub);text-align:center}
+.harness-down .big{font-size:17px;color:var(--text);font-weight:600}
+.harness-down .sub{font-size:12.5px;max-width:420px;line-height:1.8}
+.harness-down button{padding:9px 26px;font-size:14px}
+.frame-tools{position:fixed;top:10px;right:12px;z-index:40;display:flex;gap:8px}
+.frame-tools a,.frame-tools button{display:flex;align-items:center;gap:5px;padding:5px 12px;font-size:12px;color:var(--sub);background:rgba(16,20,28,.82);border:1px solid var(--border);border-radius:999px;cursor:pointer;text-decoration:none;backdrop-filter:blur(4px);font-family:inherit}
+.frame-tools a:hover,.frame-tools button:hover{color:var(--text);border-color:var(--sub)}
+.frame-tools .dot{margin-right:1px}
 .model-sel{min-width:280px;max-width:420px}
 
 /* ---------- Toast ---------- */

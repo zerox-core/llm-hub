@@ -4,11 +4,11 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>LLM Key Hub · DeepSeek Harness</title>
-<link rel="stylesheet" href="/static/hub.css?v=2">
+<link rel="stylesheet" href="/static/hub.css?v=3">
 </head>
-<body>
+<body class="page-harness">
 <aside class="sidebar">
-  <div class="side-brand">LLM Key Hub<small>本地大模型钥匙管理</small></div>
+  <div class="side-brand side-brand-row">LLM Key Hub<button class="side-toggle" data-side-toggle title="收起侧栏">«</button><small>本地大模型钥匙管理</small></div>
   <nav class="side-nav">
     <a href="/harness" class="on"><span class="ico">◆</span>DeepSeek Harness</a>
     <a href="/"><span class="ico">▦</span>渠道管理</a>
@@ -16,53 +16,27 @@
   </nav>
   <div class="side-foot">仅监听本机回环<br>http://127.0.0.1:8787</div>
 </aside>
+<button class="side-expand" data-side-toggle title="展开侧栏">☰</button>
 <div class="main">
-<div class="wrap">
-  <div class="topbar">
-    <div class="title">DeepSeek Harness<small>智能体 · 另一个窗口</small></div>
-  </div>
-
-  <div class="card">
-    <div class="row">
-      <span class="h-name">模型选择</span>
-      <select id="modelSel" class="model-sel" onchange="pickModel()"></select>
-      <span id="modelChip" class="chip blue">…</span>
-    </div>
-    <div class="kv">
-      <span><b>Auto</b> = Hub 跨渠道免费额度轮询（号池内已勾选的可对话模型，按排序逐个尝试）；<b>单选</b> = 全部请求固定走该模型，切回 Auto 即恢复轮询。</span>
-      <span>可选项来自渠道管理号池中<b>已勾选</b>的模型；注意单选对一切经 Hub 的 <code>model=auto</code> 请求生效（dsh 及其他用 auto 的客户端）。</span>
+  <div class="frame-wrap">
+    <iframe id="dshFrame" src="about:blank" title="DeepSeek Harness Web UI" style="display:none"></iframe>
+    <div id="downPane" class="harness-down">
+      <div class="big"><span id="stDot" class="dot bad"></span> DeepSeek Harness <span id="stChip" class="chip">检测中…</span></div>
+      <div class="sub">dsh web 服务未在运行。模型直接在页面内的列表里切换（数据源 = Hub /v1/models，只含渠道管理号池中已勾选的模型）；出口 provider <code>llm-hub</code> → <code>127.0.0.1:8787/v1</code>。</div>
+      <button id="btnStart" class="primary" onclick="startDsh()">启动 DeepSeek Harness</button>
     </div>
   </div>
-
-  <div class="card">
-    <div class="row">
-      <span class="h-name"><span id="stDot" class="dot unknown"></span>dsh web 服务</span>
-      <span id="stChip" class="chip">检测中…</span>
-      <span class="grow"></span>
-      <button id="btnStart" class="primary" onclick="startDsh()">启动</button>
-      <button id="btnStop" onclick="stopDsh()">停止</button>
-      <button id="btnOpen" onclick="window.open(STATE.url,'_blank')">新窗口打开</button>
-    </div>
-    <div class="kv">
-      <span>地址：<code id="stUrl">http://127.0.0.1:3080/</code>（仅本机）</span>
-      <span>模型出口：provider <code>llm-hub</code> → <code>http://127.0.0.1:8787/v1</code>，默认模型 <code>auto</code>（受上方模型选择控制）</span>
-      <span>配置文件：<code id="stPath">~/.dsh/settings.yaml</code> <span id="stCfg" class="chip">…</span></span>
-    </div>
+  <div id="frameTools" class="frame-tools" style="display:none">
+    <a id="openTab" href="#" target="_blank" rel="noopener">⤢ 新标签</a>
+    <button id="btnStop" onclick="stopDsh()" title="停止 dsh 服务">⏻ 停止</button>
   </div>
-
-  <div id="frameCard" class="frame-wrap" style="display:none">
-    <iframe id="dshFrame" src="about:blank" title="DeepSeek Harness Web UI"></iframe>
-  </div>
-</div>
 </div>
 <div id="toast"></div>
 
+<script src="/static/hub.js?v=3"></script>
 <script>
 let STATE = {running: false, url: 'http://127.0.0.1:3080/'};
-let MODEL_STATE = {model: 'auto', options: []};
-let _modelSig = '';
 const $ = s => document.querySelector(s);
-const esc = s => String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
 function toast(msg, isErr){
   const t = document.createElement('div');
@@ -90,61 +64,19 @@ function render(st){
   $('#stDot').className = 'dot ' + (st.running ? 'ok' : 'bad');
   $('#stChip').textContent = st.running ? '运行中' : '未运行';
   $('#stChip').className = 'chip ' + (st.running ? 'ok' : 'bad');
-  $('#stUrl').textContent = st.url;
-  $('#stPath').textContent = (st.settings_path || '~/.dsh/settings.yaml');
-  $('#stCfg').textContent = st.settings_ok ? '已配置（指向 Hub）' : '未配置';
-  $('#stCfg').className = 'chip ' + (st.settings_ok ? 'blue' : 'bad');
-  $('#btnStart').disabled = st.running;
-  $('#btnStop').disabled = !st.running;
-  $('#btnOpen').disabled = !st.running;
   if(st.running){
     const f = $('#dshFrame');
     const abs = new URL(st.url, location.href).href;
     if(f.src !== abs){ f.src = abs; }
-    $('#frameCard').style.display = 'block';
+    f.style.display = 'block';
+    $('#downPane').style.display = 'none';
+    $('#frameTools').style.display = 'flex';
+    $('#openTab').href = abs;
   }else{
-    $('#frameCard').style.display = 'none';
-  }
-}
-
-function renderModelSel(){
-  const m = MODEL_STATE;
-  const sig = JSON.stringify([m.model, (m.options||[]).map(o=>[o.provider_id, o.models.length, o.models.join(',')])]);
-  if(sig === _modelSig) return;
-  _modelSig = sig;
-  const sel = $('#modelSel');
-  let html = '<option value="auto">Auto（自动轮询）</option>';
-  (m.options||[]).forEach(o => {
-    html += '<optgroup label="' + esc(o.provider_name) + '">' +
-      o.models.map(x => '<option value="' + esc(x) + '">' + esc(x) + '</option>').join('') +
-      '</optgroup>';
-  });
-  sel.innerHTML = html;
-  sel.value = m.model || 'auto';
-  if(sel.value !== (m.model || 'auto')){ sel.value = 'auto'; }
-  const cur = sel.value;
-  $('#modelChip').textContent = cur === 'auto' ? 'Auto · 自动轮询' : '锁定 · ' + cur;
-  $('#modelChip').className = 'chip ' + (cur === 'auto' ? 'blue' : 'warn');
-}
-
-async function refreshModel(){
-  try{
-    MODEL_STATE = await api('/api/harness/model');
-    renderModelSel();
-  }catch(e){ /* 下轮再试 */ }
-}
-
-async function pickModel(){
-  const v = $('#modelSel').value;
-  try{
-    const r = await api('/api/harness/model', 'POST', {model: v});
-    toast(r.model === 'auto' ? '已切回 Auto：跨渠道免费额度轮询' : '已锁定模型：' + r.model);
-    MODEL_STATE.model = r.model;
-    _modelSig = '';
-    renderModelSel();
-  }catch(e){
-    toast('切换失败：' + e.message, true);
-    await refreshModel();
+    $('#dshFrame').style.display = 'none';
+    $('#downPane').style.display = 'flex';
+    $('#frameTools').style.display = 'none';
+    $('#btnStart').disabled = false;
   }
 }
 
@@ -179,13 +111,12 @@ async function stopDsh(){
   }catch(e){
     toast('停止请求失败：' + e.message, true);
   }
+  $('#btnStop').disabled = false;
   await refresh();
 }
 
 refresh();
-refreshModel();
 setInterval(refresh, 10000);
-setInterval(refreshModel, 15000);
 </script>
 </body>
 </html>

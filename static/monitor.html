@@ -4,11 +4,11 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>LLM Key Hub · 调用监控</title>
-<link rel="stylesheet" href="/static/hub.css?v=2">
+<link rel="stylesheet" href="/static/hub.css?v=3">
 </head>
 <body>
 <aside class="sidebar">
-  <div class="side-brand">LLM Key Hub<small>本地大模型钥匙管理</small></div>
+  <div class="side-brand side-brand-row">LLM Key Hub<button class="side-toggle" data-side-toggle title="收起侧栏">«</button><small>本地大模型钥匙管理</small></div>
   <nav class="side-nav">
     <a href="/harness"><span class="ico">◆</span>DeepSeek Harness</a>
     <a href="/"><span class="ico">▦</span>渠道管理</a>
@@ -16,6 +16,7 @@
   </nav>
   <div class="side-foot">仅监听本机回环<br>http://127.0.0.1:8787</div>
 </aside>
+<button class="side-expand" data-side-toggle title="展开侧栏">☰</button>
 <div class="main">
 <div class="wrap">
   <div class="topbar">
@@ -146,5 +147,6 @@ function toggleLogAuto(){
 loadLogs();
 toggleLogAuto();
 </script>
+<script src="/static/hub.js?v=3"></script>
 </body>
 </html>
