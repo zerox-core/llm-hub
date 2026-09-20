@@ -521,10 +521,8 @@ function copyHubUrl(){
 
 function copyClaudeCode(){
   const cfg = 'ANTHROPIC_BASE_URL=http://127.0.0.1:8787' +
-    '
-ANTHROPIC_AUTH_TOKEN=' + (STATE.hub_key || '(见顶栏 Hub Key)') +
-    '
-# Claude Code 走 /v1/messages 适配层；model 名不在渠道里时 Hub 自动落到 auto 跨渠道轮动';
+    '\nANTHROPIC_AUTH_TOKEN=' + (STATE.hub_key || '(见顶栏 Hub Key)') +
+    '\n# Claude Code 走 /v1/messages 适配层；model 名不在渠道里时 Hub 自动落到 auto 跨渠道轮动';
   cp(cfg);
   toast('已复制 Claude Code 环境变量配置');
 }
