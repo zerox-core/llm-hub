@@ -1673,6 +1673,149 @@ def api_logs_clear():
     return {"ok": True}
 
 
+
+
+# ---------------- DeepSeek Harness（dsh）子窗口管理 ----------------
+
+DSH_PORT = 3080
+DSH_HOME = Path.home() / ".dsh"
+DSH_SETTINGS = DSH_HOME / "settings.yaml"
+DSH_PID_FILE = BASE_DIR / "dsh.pid"
+DSH_LOG_FILE = BASE_DIR / "logs" / "dsh.log"
+
+_DSH_SETTINGS_TEXT = """\
+# 由 LLM Key Hub 自动生成：DeepSeek Harness 的所有模型调用走 Hub 总站（127.0.0.1:8787）
+agent-default-model:
+  provider: llm-hub
+  model: auto
+llm-pi-ai:
+  providers:
+    llm-hub:
+      api: openai-completions
+      baseURL: http://127.0.0.1:8787/v1
+      apiKeyEnv: HUB_API_KEY
+      compat:
+        supportsDeveloperRole: false
+        maxTokensField: max_tokens
+      models:
+        - id: auto
+"""
+
+
+def _dsh_ensure_settings():
+    """首次使用时写入指向 Hub 的 provider 配置；已存在则不覆盖（尊重手动修改）。"""
+    if DSH_SETTINGS.exists():
+        return True
+    try:
+        DSH_HOME.mkdir(parents=True, exist_ok=True)
+        DSH_SETTINGS.write_text(_DSH_SETTINGS_TEXT, encoding="utf-8")
+        return True
+    except Exception:
+        return False
+
+
+def _dsh_http_up():
+    try:
+        r = httpx.get("http://127.0.0.1:%d/" % DSH_PORT, timeout=1.5)
+        return r.status_code == 200
+    except Exception:
+        return False
+
+
+def _dsh_pid_by_port():
+    try:
+        out = subprocess.run("netstat -ano | findstr :%d" % DSH_PORT, shell=True,
+                             capture_output=True, text=True, timeout=5).stdout or ""
+    except Exception:
+        return None
+    for ln in out.splitlines():
+        parts = ln.split()
+        if len(parts) >= 5 and ":%d" % DSH_PORT in parts[1] and parts[3] == "LISTENING":
+            try:
+                return int(parts[-1])
+            except ValueError:
+                pass
+    return None
+
+
+def _dsh_status():
+    return {
+        "running": _dsh_http_up(),
+        "port": DSH_PORT,
+        "url": "http://127.0.0.1:%d/" % DSH_PORT,
+        "settings_ok": DSH_SETTINGS.exists(),
+        "settings_path": str(DSH_SETTINGS),
+    }
+
+
+def _dsh_start():
+    if _dsh_http_up():
+        return {"ok": True, "started": False, "message": "已在运行"}
+    if not _dsh_ensure_settings():
+        return {"ok": False, "message": "写入 %s 失败" % DSH_SETTINGS}
+    dsh = shutil.which("dsh")
+    if not dsh:
+        return {"ok": False, "message": "未找到 dsh 命令，请先执行：npm install -g @deepseek-ai/dsh"}
+    env = dict(os.environ)
+    env["HUB_API_KEY"] = get_hub_key(load_data())
+    try:
+        logf = open(DSH_LOG_FILE, "ab")
+        try:
+            proc = subprocess.Popen(
+                [dsh, "web", "--no-open"],
+                cwd=str(BASE_DIR), env=env, stdout=logf, stderr=subprocess.STDOUT,
+                creationflags=0x00000008 | 0x00000200)
+        finally:
+            logf.close()
+    except Exception as e:
+        return {"ok": False, "message": "启动失败：%r" % e}
+    try:
+        DSH_PID_FILE.write_text(str(proc.pid), encoding="utf-8")
+    except Exception:
+        pass
+    for _ in range(50):
+        if _dsh_http_up():
+            return {"ok": True, "started": True, "message": "dsh web 已启动"}
+        time.sleep(0.5)
+    return {"ok": False, "message": "dsh 已拉起但端口 %d 在 25 秒内未就绪，详见 logs/dsh.log" % DSH_PORT}
+
+
+def _dsh_stop():
+    pid = _dsh_pid_by_port()
+    if not pid:
+        try:
+            pid = int(DSH_PID_FILE.read_text(encoding="utf-8").strip())
+        except Exception:
+            pid = None
+    if not pid:
+        return {"ok": True, "message": "未在运行"}
+    subprocess.run("taskkill /PID %d /T /F" % pid, shell=True, capture_output=True)
+    time.sleep(1)
+    if _dsh_http_up():
+        return {"ok": False, "message": "停止失败（pid %d），见 logs/dsh.log" % pid}
+    return {"ok": True, "message": "已停止"}
+
+
+@app.get("/harness")
+def harness_page():
+    return FileResponse(STATIC_DIR / "harness.html")
+
+
+@app.get("/api/harness/status")
+def api_harness_status():
+    return _dsh_status()
+
+
+@app.post("/api/harness/start")
+def api_harness_start():
+    return _dsh_start()
+
+
+@app.post("/api/harness/stop")
+def api_harness_stop():
+    return _dsh_stop()
+
+
 if __name__ == "__main__":
     import socket
     _s = socket.socket()

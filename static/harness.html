@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LLM Key Hub · Harness 智能体</title>
+<style>
+  :root{
+    --bg:#F4F6FB; --card:#FFFFFF; --border:#E3E8F2; --text:#121722; --sub:#6D778C;
+    --primary:#2F5DDF; --primary-soft:#EAF0FE; --ok:#1FA36B; --ok-soft:#E6F7EF;
+    --warn:#C77F1A; --warn-soft:#FCF3E3; --bad:#D94460; --bad-soft:#FCEAEE;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--text);font-family:"Noto Sans SC","PingFang SC","Microsoft YaHei",-apple-system,sans-serif;font-size:14px;line-height:1.6}
+  .wrap{max-width:1280px;margin:0 auto;padding:24px 20px 40px}
+  .topbar{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;flex-wrap:wrap;gap:12px}
+  .title{font-size:20px;font-weight:700;letter-spacing:.5px}
+  .title small{font-size:12px;color:var(--sub);font-weight:400;margin-left:10px}
+  .navtabs{display:flex;gap:4px}
+  .navtabs a{padding:5px 14px;border-radius:8px;font-size:13px;color:var(--sub);text-decoration:none;border:1px solid transparent}
+  .navtabs a.on{background:var(--primary-soft);color:var(--primary);font-weight:600}
+  .navtabs a:hover{border-color:var(--border);color:var(--primary)}
+  button{cursor:pointer;border:1px solid var(--border);background:var(--card);color:var(--text);
+    border-radius:8px;padding:6px 14px;font-size:13px;font-family:inherit;transition:all .15s}
+  button:hover{border-color:var(--primary);color:var(--primary)}
+  button.primary{background:var(--primary);border-color:var(--primary);color:#fff}
+  button.primary:hover{background:#2550c4;color:#fff}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  .chip{display:inline-block;padding:2px 10px;border-radius:999px;font-size:12px;border:1px solid var(--border);color:var(--sub);background:#fff}
+  .chip.ok{background:var(--ok-soft);color:var(--ok);border-color:transparent}
+  .chip.bad{background:var(--bad-soft);color:var(--bad);border-color:transparent}
+  .chip.blue{background:var(--primary-soft);color:var(--primary);border-color:transparent}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:18px 20px;margin-bottom:16px}
+  .row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .row .grow{flex:1}
+  .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px;vertical-align:middle}
+  .dot.ok{background:var(--ok)} .dot.bad{background:var(--bad)} .dot.unknown{background:#C4CCDC}
+  .h-name{font-size:16px;font-weight:600}
+  code{background:#F0F3FA;padding:1px 6px;border-radius:4px;font-family:Consolas,monospace;font-size:12px}
+  .kv{font-size:12.5px;color:var(--sub);margin-top:10px;display:flex;flex-direction:column;gap:4px}
+  .kv b{color:var(--text);font-weight:600}
+  .frame-wrap{border:1px solid var(--border);border-radius:10px;overflow:hidden;background:#fff}
+  iframe{display:block;width:100%;height:calc(100vh - 250px);min-height:480px;border:0}
+  #toast{position:fixed;right:20px;bottom:20px;display:flex;flex-direction:column;gap:8px;z-index:99}
+  .toast{background:#1C2433;color:#fff;padding:9px 16px;border-radius:8px;font-size:13px;box-shadow:0 4px 16px rgba(0,0,0,.18);max-width:420px;word-break:break-all}
+  .toast.err{background:var(--bad)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="topbar">
+    <div class="title">LLM Key Hub<small>DeepSeek Harness 智能体 · 另一个窗口</small></div>
+    <div class="navtabs">
+      <a href="/">渠道管理</a>
+      <a href="/monitor">调用监控</a>
+      <a href="/harness" class="on">Harness 智能体</a>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <span class="h-name"><span id="stDot" class="dot unknown"></span>dsh web 服务</span>
+      <span id="stChip" class="chip">检测中…</span>
+      <span class="grow"></span>
+      <button id="btnStart" class="primary" onclick="startDsh()">启动</button>
+      <button id="btnStop" onclick="stopDsh()">停止</button>
+      <button id="btnOpen" onclick="window.open(STATE.url,'_blank')">新窗口打开</button>
+    </div>
+    <div class="kv">
+      <span>地址：<code id="stUrl">http://127.0.0.1:3080/</code>（仅本机）</span>
+      <span>模型出口：provider <code>llm-hub</code> → <code>http://127.0.0.1:8787/v1</code>，默认模型 <code>auto</code>（Hub 跨渠道免费额度轮动 + 试用完即停保护）</span>
+      <span>配置文件：<code id="stPath">~/.dsh/settings.yaml</code> <span id="stCfg" class="chip">…</span></span>
+      <span>提示：在 Harness 设置 → Models 里点「获取可用模型」可拉取 Hub 全量模型清单；改模型即时生效，无需重启。</span>
+    </div>
+  </div>
+
+  <div id="frameCard" class="frame-wrap" style="display:none">
+    <iframe id="dshFrame" src="about:blank" title="DeepSeek Harness Web UI"></iframe>
+  </div>
+</div>
+<div id="toast"></div>
+
+<script>
+let STATE = {running: false, url: 'http://127.0.0.1:3080/'};
+const $ = s => document.querySelector(s);
+
+function toast(msg, isErr){
+  const t = document.createElement('div');
+  t.className = 'toast' + (isErr ? ' err' : '');
+  t.textContent = msg;
+  $('#toast').appendChild(t);
+  setTimeout(()=>t.remove(), isErr ? 7000 : 3000);
+}
+
+async function api(path, method, body){
+  const opt = {method: method||'GET', headers:{'Content-Type':'application/json'}};
+  if(body !== undefined) opt.body = JSON.stringify(body);
+  const r = await fetch(path, opt);
+  if(!r.ok){ throw new Error('HTTP ' + r.status); }
+  return await r.json();
+}
+
+function render(st){
+  STATE.running = !!st.running;
+  STATE.url = st.url || STATE.url;
+  $('#stDot').className = 'dot ' + (st.running ? 'ok' : 'bad');
+  $('#stChip').textContent = st.running ? '运行中' : '未运行';
+  $('#stChip').className = 'chip ' + (st.running ? 'ok' : 'bad');
+  $('#stUrl').textContent = st.url;
+  $('#stPath').textContent = (st.settings_path || '~/.dsh/settings.yaml');
+  $('#stCfg').textContent = st.settings_ok ? '已配置（指向 Hub）' : '未配置';
+  $('#stCfg').className = 'chip ' + (st.settings_ok ? 'blue' : 'bad');
+  $('#btnStart').disabled = st.running;
+  $('#btnStop').disabled = !st.running;
+  $('#btnOpen').disabled = !st.running;
+  if(st.running){
+    const f = $('#dshFrame');
+    if(f.src === 'about:blank' || !f.src){ f.src = st.url; }
+    $('#frameCard').style.display = 'block';
+  }else{
+    $('#frameCard').style.display = 'none';
+  }
+}
+
+async function refresh(){
+  try{
+    render(await api('/api/harness/status'));
+  }catch(e){
+    $('#stChip').textContent = 'Hub 接口异常';
+    $('#stChip').className = 'chip bad';
+  }
+}
+
+async function startDsh(){
+  $('#btnStart').disabled = true;
+  $('#stChip').textContent = '启动中…（首次约需数秒）';
+  $('#stChip').className = 'chip';
+  try{
+    const r = await api('/api/harness/start', 'POST', {});
+    if(r.ok){ toast(r.started ? 'dsh web 已启动' : 'dsh web 已在运行'); }
+    else{ toast(r.message || '启动失败', true); }
+  }catch(e){
+    toast('启动请求失败：' + e.message, true);
+  }
+  await refresh();
+}
+
+async function stopDsh(){
+  $('#btnStop').disabled = true;
+  try{
+    const r = await api('/api/harness/stop', 'POST', {});
+    toast(r.ok ? (r.message || '已停止') : (r.message || '停止失败'), !r.ok);
+  }catch(e){
+    toast('停止请求失败：' + e.message, true);
+  }
+  await refresh();
+}
+
+refresh();
+setInterval(refresh, 10000);
+</script>
+</body>
+</html>
