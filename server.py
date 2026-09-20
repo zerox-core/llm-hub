@@ -240,9 +240,19 @@ AG_GROUP_TITLES = {"gemini": "Gemini 组", "third": "Claude / GPT 组"}
 # Google 侧按 User-Agent 做产品 license 校验：不带 antigravity UA 会 403 (#3501)
 AG_UA = "antigravity/1.11.5 windows/amd64"
 
+# WorkBuddy（腾讯 CodeBuddy）反代：与 AG 共用本地 cli-proxy-api（:8317），
+# Hub 渠道用 kind="wb" 标记区分；模型前缀用于从 8317 模型列表里分拣 wb 模型。
+WB_MODEL_PREFIXES = ("glm-5", "kimi", "minimax", "hy3", "deepseek-v4")
+WB_AUTH_FILE = os.path.join(AG_AUTH_DIR, "workbuddy.json")
+
+
+def is_wb_provider(p) -> bool:
+    return p.get("kind") == "wb"
+
 
 def is_ag_provider(p) -> bool:
-    return p.get("type") == "openai" and ":8317" in (p.get("base_url") or "")
+    return (p.get("type") == "openai" and ":8317" in (p.get("base_url") or "")
+            and p.get("kind") != "wb")
 
 
 def ag_model_group(model: str) -> str:
@@ -672,6 +682,9 @@ def state():
         "harness_model": d.get("harness_model") or "auto",
         "autostart_harness": bool(d.get("autostart_harness", True)),
         "server_time": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "wb_status": {"installed": (CLIPROXY_DIR / "plugins" / "workbuddy.dll").exists(),
+                      "logged_in": wb_auth_exists(),
+                      "account": wb_account_info()},
     }
 
 
@@ -1177,7 +1190,7 @@ def _ag_refresh_hub_provider():
     d = load_data()
     hit = None
     for p in d.get("providers", []):
-        if "8317" in (p.get("base_url") or ""):
+        if "8317" in (p.get("base_url") or "") and p.get("kind") != "wb":
             hit = p
             break
     if not hit:
@@ -1186,6 +1199,7 @@ def _ag_refresh_hub_provider():
         eff, ids, _ = fetch_models(hit["base_url"], hit.get("api_key") or ag_api_key())
     except Exception as e:
         return {"refreshed": False, "reason": str(e)[:200]}
+    ids = [m for m in ids if not str(m).startswith(WB_MODEL_PREFIXES)]
     hit["base_url"] = eff
     hit["models"] = ids
     hit["last_refresh"] = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -1294,6 +1308,178 @@ def ag_login_status():
             out["proxy_restarted"] = True
             out["models_count"] = ag_models_count()
         out["hub_refresh"] = _ag_refresh_hub_provider()
+    return out
+
+
+# ---------------- WorkBuddy（腾讯 CodeBuddy）反代授权 ----------------
+# 与 AG 共用同一个 cli-proxy-api（:8317）进程，WB 以插件（plugins/workbuddy.dll）
+# 形式注册 workbuddy provider；登录走 CPA 管理口（/v0/management）：
+#   1) GET /workbuddy-auth-url   → {url, state}（腾讯 CodeBuddy 登录页，微信扫码/手机号/邮箱）
+#   2) GET /get-auth-status?state=… → wait / ok / error
+# 成功后 CPA 把凭证写进 ~/.cli-proxy-api/workbuddy.json，无需重启进程。
+
+WB_MGMT_BASE = "http://127.0.0.1:8317/v0/management"
+_wb_login = {"state": None, "url": None, "started_at": None,
+             "status": None, "detail": None, "restarted": False}
+
+
+def wb_mgmt_key():
+    """CPA 管理密钥（首次启用插件时由安装脚本写入 cliproxy/mgmt_key.txt）"""
+    f = CLIPROXY_DIR / "mgmt_key.txt"
+    try:
+        return f.read_text(encoding="utf-8").strip()
+    except Exception:
+        return ""
+
+
+def _wb_mgmt_get(path, timeout=15.0):
+    key = wb_mgmt_key()
+    if not key:
+        raise HTTPException(400, "未找到 cliproxy/mgmt_key.txt（反代管理密钥）")
+    with httpx.Client(timeout=timeout, trust_env=False) as cli:
+        return cli.get(WB_MGMT_BASE + path,
+                       headers={"X-Management-Key": key})
+
+
+def wb_auth_exists():
+    return os.path.exists(WB_AUTH_FILE)
+
+
+def wb_account_info():
+    """workbuddy.json 的脱敏摘要（只取白名单字段，绝不外带 token）"""
+    if not wb_auth_exists():
+        return None
+    try:
+        with open(WB_AUTH_FILE, encoding="utf-8") as f:
+            d = json.load(f)
+        if isinstance(d, dict):
+            info = {k: d[k] for k in ("email", "account", "user", "name", "type")
+                    if k in d}
+            return info or {"file": "workbuddy.json"}
+    except Exception:
+        pass
+    return {"file": "workbuddy.json"}
+
+
+def wb_models_count():
+    """本地反代当前暴露的 wb 前缀模型数；拿不到 = 反代未跑或未登录"""
+    try:
+        with httpx.Client(timeout=8.0, trust_env=False) as cli:
+            r = cli.get("http://127.0.0.1:8317/v1/models",
+                        headers={"Authorization": "Bearer " + ag_api_key()})
+            if r.status_code == 200:
+                items = r.json().get("data") or r.json().get("models") or []
+                return len([m for m in items
+                            if str(m.get("id", "")).startswith(WB_MODEL_PREFIXES)])
+    except Exception:
+        pass
+    return 0
+
+
+def _wb_refresh_hub_provider():
+    """登录完成后，刷新 Hub 里 kind=wb 渠道的模型列表（只收 wb 前缀模型）"""
+    d = load_data()
+    hit = None
+    for p in d.get("providers", []):
+        if p.get("kind") == "wb":
+            hit = p
+            break
+    if not hit:
+        return {"refreshed": False, "reason": "hub 里没有 kind=wb 的渠道"}
+    try:
+        eff, ids, _ = fetch_models(hit["base_url"], hit.get("api_key") or ag_api_key())
+    except Exception as e:
+        return {"refreshed": False, "reason": str(e)[:200]}
+    ids = [m for m in ids if str(m).startswith(WB_MODEL_PREFIXES)]
+    hit["base_url"] = eff
+    hit["models"] = ids
+    hit["last_refresh"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    hit["fetch_error"] = None
+    if ids and hit.get("active_model") not in ids:
+        hit["active_model"] = ids[0]
+    save_data(d)
+    return {"refreshed": True, "count": len(ids)}
+
+
+@app.get("/api/wb/status")
+def wb_status():
+    """WB 反代状态：插件是否装好 + 凭证是否已登录 + wb 模型数"""
+    dll = CLIPROXY_DIR / "plugins" / "workbuddy.dll"
+    return {"installed": dll.exists(),
+            "logged_in": wb_auth_exists(),
+            "account": wb_account_info(),
+            "models_count": wb_models_count(),
+            "mgmt_key_set": bool(wb_mgmt_key())}
+
+
+@app.post("/api/wb/login")
+def wb_login_start():
+    """向 CPA 管理口拿 WorkBuddy 登录链接（腾讯 CodeBuddy 登录页）。"""
+    dll = CLIPROXY_DIR / "plugins" / "workbuddy.dll"
+    if not dll.exists():
+        raise HTTPException(400, "未检测到 cliproxy/plugins/workbuddy.dll 插件")
+    if _wb_login.get("state") and _wb_login.get("status") == "wait":
+        return {"ok": True, "already": True, "url": _wb_login.get("url"),
+                "message": "WorkBuddy 登录已在进行中，请在打开的页面完成授权"}
+    try:
+        r = _wb_mgmt_get("/workbuddy-auth-url")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, "无法连接本地反代管理口（cli-proxy-api 未在运行？）：%r" % e)
+    if r.status_code != 200:
+        raise HTTPException(502, "管理口返回 %s：%s" % (r.status_code, r.text[:200]))
+    data = r.json()
+    url, state = data.get("url"), data.get("state")
+    if not url or not state:
+        raise HTTPException(502, "管理口未返回登录链接：" + r.text[:200])
+    _wb_login.update({"state": state, "url": url,
+                      "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                      "status": "wait", "detail": None, "restarted": False})
+    return {"ok": True, "url": url, "state": state,
+            "message": "已获取登录链接，请在新页面完成 CodeBuddy 登录（微信扫码 / 手机号 / 邮箱）"}
+
+
+@app.get("/api/wb/login/status")
+def wb_login_status():
+    """前端轮询：查管理口登录进度；成功后刷新 Hub 的 wb 渠道模型列表。"""
+    out = {"running": bool(_wb_login.get("state")) and _wb_login.get("status") == "wait",
+           "started_at": _wb_login.get("started_at"),
+           "logged_in": wb_auth_exists(),
+           "models_count": wb_models_count(),
+           "status": _wb_login.get("status"),
+           "detail": _wb_login.get("detail")}
+    if out["running"]:
+        try:
+            r = _wb_mgmt_get("/get-auth-status?state=" + _wb_login["state"])
+            if r.status_code == 200:
+                st = r.json()
+                s = st.get("status")
+                if s == "ok":
+                    _wb_login["status"] = "ok"
+                    out["status"] = "ok"
+                    out["running"] = False
+                    rf = _wb_refresh_hub_provider()
+                    if not rf.get("count") and not _wb_login.get("restarted"):
+                        # 模型没冒出来就重启一次反代兜底（与 AG 登录后处理一致）
+                        _wb_login["restarted"] = True
+                        _ag_restart_proxy()
+                        out["proxy_restarted"] = True
+                        rf = _wb_refresh_hub_provider()
+                    out["hub_refresh"] = rf
+                    out["models_count"] = wb_models_count()
+                elif s == "error":
+                    _wb_login["status"] = "error"
+                    _wb_login["detail"] = (st.get("error") or st.get("message")
+                                           or "登录失败")[:300]
+                    out["status"] = "error"
+                    out["detail"] = _wb_login["detail"]
+                    out["running"] = False
+                # "wait" → 继续等用户扫码
+        except HTTPException:
+            raise
+        except Exception as e:
+            out["poll_error"] = str(e)[:200]
     return out
 
 

@@ -29,6 +29,7 @@
       <button onclick="toggleFreetier()">试用完即停：开启</button>
       <button id="authBtn" onclick="startBlAuth()">授权百炼控制台</button>
       <button id="agBtn" onclick="startAgAuth()">授权反重力 Google</button>
+      <button id="wbBtn" onclick="startWbAuth()">登录 WorkBuddy</button>
       <button onclick="syncQuota()">同步百炼额度</button>
       <button class="primary" onclick="toggleAdd()">+ 添加渠道</button>
     </div>
@@ -70,20 +71,6 @@
     <button class="small" onclick="addPool()">+ 新建号池</button>
   </div>
   <div id="providers"></div>
-
-  <div class="sec-title">WorkBuddy 渠道组（预留）</div>
-  <div class="card wb-card">
-    <div class="p-head">
-      <span class="p-name">WorkBuddy 反代</span>
-      <span class="chip">待接入</span>
-      <span class="grow"></span>
-      <button class="small" disabled title="接入方式未定，等实际登录 WorkBuddy 账号看过之后再开通">接入 WorkBuddy（未开放）</button>
-    </div>
-    <div class="kv">
-      <span>规划：登录 WorkBuddy 账号后，把其中的模型反代进 Hub —— 既包括<b>免费额度模型</b>，也包括账号里的<b>积分额度模型</b>。</span>
-      <span>接入方式待实际登录账号后确定（候选：官方 OpenAI Key 直连 / 账号会话反代），确定后此卡片组升级为完整渠道组。</span>
-    </div>
-  </div>
 
   <div class="sec-title">百炼免费额度明细（来自 bl usage free，分钟级口径以控制台为准）</div>
   <div class="card">
@@ -167,7 +154,8 @@ function enabledCount(p){
 }
 
 // ---- 反重力（Antigravity）组额度：组内模型共享 5 小时 + 每周额度 ----
-function isAgProvider(p){ return p && p.type === 'openai' && (p.base_url||'').includes(':8317'); }
+function isAgProvider(p){ return p && p.type === 'openai' && (p.base_url||'').includes(':8317') && p.kind !== 'wb'; }
+function isWbProvider(p){ return p && p.kind === 'wb'; }
 function agModelGroup(m){ return (m||'').toLowerCase().startsWith('gemini') ? 'gemini' : 'third'; }
 function agGroupTitle(key){ return key === 'gemini' ? 'Gemini 组' : 'Claude/GPT 组'; }
 
@@ -315,11 +303,14 @@ function renderProvider(p){
   const collapsed = isCollapsed(p.id);
   const isBailian = p.type === 'bailian';
   const isAg = isAgProvider(p);
+  const isWb = isWbProvider(p);
+  const wbst = STATE.wb_status || {};
   const activeNoFree = isBailian && p.active_model && !p.allow_paid && qState(p.active_model) !== 'free_ok';
   const activeWarn = activeNoFree ? ' <span class="chip bad">无免费额度</span>' : '';
   const paidChip = p.allow_paid ? ' <span class="chip warn">允许付费</span>' : '';
+  const wbChip = isWb ? ' <span class="chip '+(wbst.logged_in?'ok':'bad')+'">'+(wbst.logged_in?'已登录':'未登录')+'</span>' : '';
   let head = '<div class="p-head"><span class="p-name">'+esc(p.name)+'</span>' +
-    '<span class="chip">'+(isBailian?'阿里云百炼':'OpenAI 兼容')+'</span>' + paidChip +
+    '<span class="chip">'+(isWb?'腾讯 CodeBuddy 反代':(isBailian?'阿里云百炼':'OpenAI 兼容'))+'</span>' + wbChip + paidChip +
     '<span class="chip blue">已勾选 '+enabledCount(p)+' / '+(p.models||[]).length+'</span>' +
     '<span class="p-active">当前模型：<b>'+esc(p.active_model||'未选择')+'</b>'+activeWarn+'</span>' +
     '<span class="grow"></span>' + poolSwitchSel(p) +
@@ -375,6 +366,9 @@ function renderProvider(p){
   }).join('');
 
   const fetchErr = p.fetch_error ? '<div class="quota-line" style="color:var(--bad)">'+esc(p.fetch_error)+'</div>' : '';
+  const wbHint = isWb ? '<div class="quota-line">' + (wbst.logged_in
+    ? '已通过 CodeBuddy 账号登录反代（workbuddy 插件）；点「刷新模型列表」拉取 glm-5 / kimi / minimax / hy3 / deepseek-v4 系列模型。'
+    : '尚未登录：点右上角「登录 WorkBuddy」，在打开的腾讯 CodeBuddy 页面完成授权（微信扫码 / 手机号 / 邮箱），成功后自动拉取 glm-5.2 / kimi-k2.7 / deepseek-v4 等模型。') + '</div>' : '';
   const paidBox = isBailian ?
     '<label class="paid-box'+(p.allow_paid?' on':'')+'" title="勾选后：测试与轮询可使用无免费额度的模型（会计费）。默认不勾选＝只用免费额度。">' +
     '<input type="checkbox" '+(p.allow_paid?'checked ':'')+'onchange="togglePaid(\''+p.id+'\', this.checked)">允许付费调用</label>' : '';
@@ -385,7 +379,7 @@ function renderProvider(p){
     '<span class="q-num">已隐藏无免费额度 '+hiddenCnt+' 个</span>' : '';
   const quotaNote = isBailian ? '<span class="chip '+(nFree?'ok':'bad')+'">有免费额度 '+nFree+' / '+models.length+'</span>' : '';
 
-  return '<div class="card">' + head +
+  return '<div class="card">' + head + wbHint +
     '<div class="p-meta">' +
       '<span>URL <code>'+esc(p.base_url)+'</code> <button class="small" onclick="cp(\''+esc(p.base_url)+'\')">复制</button></span>' +
       '<span>Key <code id="key-'+p.id+'">'+esc(maskKey(p.api_key))+'</code> ' +
@@ -747,6 +741,42 @@ async function pollAgAuth(){
       toast('反重力授权成功，反代可用模型 ' + s.models_count + ' 个' + (hr && hr.refreshed ? '，渠道已自动刷新' : ''));
     }else{
       toast('授权流程已结束，但反代还没有可用模型' + (s.log_tail ? '：' + s.log_tail.slice(-160) : '，可重试'), true);
+    }
+    await load();
+  }catch(e){ /* 轮询失败忽略，下轮再试 */ }
+}
+
+// ---------------- WorkBuddy（腾讯 CodeBuddy）反代登录 ----------------
+let _wbPoll = null;
+async function startWbAuth(){
+  const btn = $('#wbBtn');
+  btn.disabled = true;
+  try{
+    const r = await api('/api/wb/login', 'POST', {});
+    if(r.url) window.open(r.url, '_blank');
+    toast(r.message || '已打开 WorkBuddy 登录页，请完成 CodeBuddy 授权');
+    btn.textContent = '等待 WorkBuddy 授权…';
+    if(_wbPoll) clearInterval(_wbPoll);
+    _wbPoll = setInterval(pollWbAuth, 3000);
+  }catch(e){
+    toast('启动登录失败：' + e.message, true);
+    btn.disabled = false;
+  }
+}
+
+async function pollWbAuth(){
+  try{
+    const s = await api('/api/wb/login/status');
+    if(s.running) return;
+    clearInterval(_wbPoll); _wbPoll = null;
+    const btn = $('#wbBtn');
+    btn.disabled = false;
+    btn.textContent = '登录 WorkBuddy';
+    if(s.status === 'ok'){
+      const hr = s.hub_refresh;
+      toast('WorkBuddy 登录成功，反代可用模型 ' + (s.models_count || 0) + ' 个' + (hr && hr.refreshed ? '，渠道已自动刷新' : ''));
+    }else{
+      toast('WorkBuddy 登录未完成' + (s.detail ? '：' + s.detail : '，可重试'), true);
     }
     await load();
   }catch(e){ /* 轮询失败忽略，下轮再试 */ }
