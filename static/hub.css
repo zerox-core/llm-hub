@@ -132,14 +132,29 @@ details.raw pre{background:#131926;border:1px solid var(--border);border-radius:
 
 /* ---------- Harness 页（dsh 全屏嵌入壳） ---------- */
 body.page-harness{overflow:hidden}
-body.page-harness .main{height:100vh}
-.frame-wrap{position:relative;width:100%;height:100vh;background:#000;overflow:hidden}
+body.page-harness .main{display:flex;flex-direction:column;height:100vh}
+.shell-bar{flex:none;height:44px;display:flex;align-items:center;justify-content:space-between;padding:0 10px 0 12px;background:#0C1017;border-bottom:1px solid var(--border);position:relative;z-index:45}
+.mpick{position:relative}
+.mpick-btn{display:flex;align-items:center;gap:7px;padding:5px 12px;font-size:12.5px;color:var(--text);background:rgba(22,27,36,.9);border:1px solid var(--border);border-radius:999px;cursor:pointer;font-family:inherit;max-width:360px}
+.mpick-btn:hover{border-color:var(--sub)}
+.mpick-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:280px}
+.mpick-caret{color:var(--sub);font-size:11px}
+.mpick-panel{position:absolute;top:calc(100% + 8px);left:0;width:330px;max-height:62vh;overflow:auto;background:#131924;border:1px solid var(--border);border-radius:12px;box-shadow:0 14px 36px rgba(0,0,0,.55);padding:6px;z-index:70}
+.mpick-hint{padding:7px 10px 6px;font-size:11.5px;color:var(--sub);line-height:1.6}
+.mpick-group{padding:8px 10px 3px;font-size:11px;color:var(--sub);letter-spacing:.5px}
+.mpick-item{display:flex;align-items:center;gap:8px;padding:7px 10px;border-radius:8px;cursor:pointer;font-size:13px;color:var(--text)}
+.mpick-item:hover{background:var(--primary-soft)}
+.mpick-item.cur{color:var(--primary)}
+.mpick-item .ck{flex:none;width:14px;font-size:12px;color:var(--primary)}
+.mpick-item .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mpick-sep{height:1px;background:var(--border);margin:5px 4px}
+.frame-wrap{position:relative;width:100%;flex:1;min-height:0;background:#000;overflow:hidden}
 .frame-wrap iframe{position:absolute;inset:0;width:100%;height:100%;border:0;display:block}
 .harness-down{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;color:var(--sub);text-align:center}
 .harness-down .big{font-size:17px;color:var(--text);font-weight:600}
 .harness-down .sub{font-size:12.5px;max-width:420px;line-height:1.8}
 .harness-down button{padding:9px 26px;font-size:14px}
-.frame-tools{position:fixed;top:10px;right:12px;z-index:40;display:flex;gap:8px}
+.frame-tools{display:flex;gap:8px;align-items:center}
 .frame-tools a,.frame-tools button{display:flex;align-items:center;gap:5px;padding:5px 12px;font-size:12px;color:var(--sub);background:rgba(16,20,28,.82);border:1px solid var(--border);border-radius:999px;cursor:pointer;text-decoration:none;backdrop-filter:blur(4px);font-family:inherit}
 .frame-tools a:hover,.frame-tools button:hover{color:var(--text);border-color:var(--sub)}
 .frame-tools .dot{margin-right:1px}

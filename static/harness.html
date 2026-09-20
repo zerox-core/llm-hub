@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>LLM Key Hub · DeepSeek Harness</title>
-<link rel="stylesheet" href="/static/hub.css?v=3">
+<link rel="stylesheet" href="/static/hub.css?v=4">
 </head>
 <body class="page-harness">
 <aside class="sidebar">
@@ -18,22 +18,31 @@
 </aside>
 <button class="side-expand" data-side-toggle title="展开侧栏">☰</button>
 <div class="main">
+  <div class="shell-bar">
+    <div class="mpick">
+      <button class="mpick-btn" id="mpickBtn" onclick="toggleMpick(event)" title="选择模型：Auto = 号池轮询，指定模型 = 锁定">
+        <span class="mpick-label" id="mpickLabel">加载中…</span>
+        <span class="mpick-caret">▾</span>
+      </button>
+      <div class="mpick-panel" id="mpickPanel" style="display:none"></div>
+    </div>
+    <div id="frameTools" class="frame-tools" style="display:none">
+      <a id="openTab" href="#" target="_blank" rel="noopener">⤢ 新标签</a>
+      <button id="btnStop" onclick="stopDsh()" title="停止 dsh 服务">⏻ 停止</button>
+    </div>
+  </div>
   <div class="frame-wrap">
     <iframe id="dshFrame" src="about:blank" title="DeepSeek Harness Web UI" style="display:none"></iframe>
     <div id="downPane" class="harness-down">
       <div class="big"><span id="stDot" class="dot bad"></span> DeepSeek Harness <span id="stChip" class="chip">检测中…</span></div>
-      <div class="sub">dsh web 服务未在运行。模型直接在页面内的列表里切换（数据源 = Hub /v1/models，只含渠道管理号池中已勾选的模型）；出口 provider <code>llm-hub</code> → <code>127.0.0.1:8787/v1</code>。</div>
+      <div class="sub">dsh web 服务未在运行。模型在顶部栏切换：Auto = 号池自动轮询，指定模型 = 锁定单模型（候选 = 渠道管理号池中已勾选的模型）；出口 provider <code>llm-hub</code> → <code>127.0.0.1:8787/v1</code>。</div>
       <button id="btnStart" class="primary" onclick="startDsh()">启动 DeepSeek Harness</button>
     </div>
-  </div>
-  <div id="frameTools" class="frame-tools" style="display:none">
-    <a id="openTab" href="#" target="_blank" rel="noopener">⤢ 新标签</a>
-    <button id="btnStop" onclick="stopDsh()" title="停止 dsh 服务">⏻ 停止</button>
   </div>
 </div>
 <div id="toast"></div>
 
-<script src="/static/hub.js?v=3"></script>
+<script src="/static/hub.js?v=4"></script>
 <script>
 let STATE = {running: false, url: 'http://127.0.0.1:3080/'};
 const $ = s => document.querySelector(s);
@@ -56,6 +65,77 @@ async function api(path, method, body){
     throw new Error(msg);
   }
   return await r.json();
+}
+
+/* ===== 模型选择器（顶部栏，Codex 式列表切换；Auto=号池轮询，选定=hub 级锁定） ===== */
+let MODEL = 'auto', MODEL_OPTS = [];
+
+function esc(s){
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function curLabel(){
+  return MODEL === 'auto' ? 'Auto · 号池轮询' : MODEL;
+}
+
+function itemHtml(val, label){
+  const cur = (val === MODEL);
+  return '<div class="mpick-item' + (cur ? ' cur' : '') + '" data-m="' + esc(val) + '">' +
+    '<span class="ck">' + (cur ? '✓' : '') + '</span>' +
+    '<span class="nm">' + esc(label) + '</span></div>';
+}
+
+function renderMpick(){
+  $('#mpickLabel').textContent = curLabel();
+  const p = $('#mpickPanel');
+  let h = '<div class="mpick-hint">Auto = 号池内自动轮询；指定模型 = 锁定单模型，立即生效无需重启。候选来自渠道管理号池中已勾选的模型。</div>';
+  h += itemHtml('auto', 'Auto · 号池轮询');
+  h += '<div class="mpick-sep"></div>';
+  MODEL_OPTS.forEach(function(g){
+    h += '<div class="mpick-group">' + esc(g.provider_name) + '（' + g.models.length + '）</div>';
+    g.models.forEach(function(m){ h += itemHtml(m, m); });
+  });
+  p.innerHTML = h;
+  p.querySelectorAll('.mpick-item').forEach(function(el){
+    el.addEventListener('click', function(){ pickModel(el.dataset.m); });
+  });
+}
+
+async function loadModel(){
+  try{
+    const j = await api('/api/harness/model');
+    MODEL = j.model || 'auto';
+    MODEL_OPTS = j.options || [];
+    renderMpick();
+  }catch(e){
+    $('#mpickLabel').textContent = '模型接口异常';
+  }
+}
+
+function toggleMpick(e){
+  e.stopPropagation();
+  const p = $('#mpickPanel');
+  const opening = (p.style.display === 'none');
+  p.style.display = opening ? 'block' : 'none';
+  if(opening){ loadModel(); }
+}
+
+document.addEventListener('click', function(e){
+  const p = $('#mpickPanel');
+  if(p && p.style.display !== 'none' && !e.target.closest('.mpick')){ p.style.display = 'none'; }
+});
+
+async function pickModel(m){
+  $('#mpickPanel').style.display = 'none';
+  if(m === MODEL){ return; }
+  try{
+    await api('/api/harness/model', 'POST', {model: m});
+    MODEL = m;
+    renderMpick();
+    toast(m === 'auto' ? '已切回 Auto · 号池轮询' : '已锁定模型：' + m);
+  }catch(e){
+    toast('切换失败：' + e.message, true);
+  }
 }
 
 function render(st){
@@ -116,6 +196,7 @@ async function stopDsh(){
 }
 
 refresh();
+loadModel();
 setInterval(refresh, 10000);
 </script>
 </body>
