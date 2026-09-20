@@ -24,6 +24,7 @@ from pathlib import Path
 import httpx
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
@@ -601,6 +602,14 @@ def refresh_quota():
 # ---------------- FastAPI ----------------
 
 app = FastAPI(title="LLM Key Hub")
+
+# dsh 面板注入的模型卡片从 3080 端口页面跨源调用本 API，需要 CORS 放行
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://127.0.0.1:3080", "http://localhost:3080"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 class ProviderIn(BaseModel):
