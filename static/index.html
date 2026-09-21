@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>LLM Key Hub · 渠道管理</title>
-<link rel="stylesheet" href="/static/hub.css?v=7">
+<link rel="stylesheet" href="/static/hub.css?v=8">
 </head>
 <body>
 <aside class="sidebar">
@@ -28,10 +28,6 @@
       <span id="hubKeyChip" class="chip" style="cursor:pointer" title="Hub 统一入口 key（/v1 接口鉴权用），点击复制完整 key" onclick="copyHubKey()">Hub Key：…</span>
       <button onclick="copyClaudeCode()">Claude Code 配置</button>
       <button onclick="toggleFreetier()">试用完即停：开启</button>
-      <button id="authBtn" onclick="startBlAuth()">授权百炼控制台</button>
-      <button id="agBtn" onclick="startAgAuth()">授权反重力 Google</button>
-      <button id="wbBtn" onclick="startWbAuth()">登录 WorkBuddy</button>
-      <button onclick="syncQuota()">同步百炼额度</button>
       <button class="primary" onclick="toggleAdd()">+ 添加渠道</button>
     </div>
   </div>
@@ -79,7 +75,7 @@
     <div class="panel-grid" id="panels"></div>
     <div class="sec-title">百炼免费额度明细（来自 bl usage free，分钟级口径以控制台为准）</div>
     <div class="card">
-      <div id="quotaSummary" class="quota-line">尚未同步。点击右上角「同步百炼额度」。</div>
+      <div id="quotaSummary" class="quota-line">尚未同步。在百炼渠道卡片的「配置与授权」里点「同步百炼额度」。</div>
       <details class="raw"><summary>查看原始返回（调试用）</summary><pre id="quotaRaw">（无）</pre></details>
     </div>
   </div>
@@ -473,7 +469,7 @@ function renderProvider(p, forceOpen){
   const fetchErr = p.fetch_error ? '<div class="quota-line" style="color:var(--bad)">'+esc(p.fetch_error)+'</div>' : '';
   const wbHint = isWb ? '<div class="quota-line">' + (wbst.logged_in
     ? '已通过 CodeBuddy 账号登录反代；「刷新模型列表」拉取模型，「同步积分」更新积分余额与每模型使用倍率。'
-    : '尚未登录：点右上角「登录 WorkBuddy」，在打开的腾讯 CodeBuddy 页面完成授权（微信扫码 / 手机号 / 邮箱），成功后自动拉取 glm-5.2 / kimi-k2.7 / deepseek-v4 等模型。') + '</div>' : '';
+    : '尚未登录：展开上方「配置与授权」，点「登录 WorkBuddy」，在打开的腾讯 CodeBuddy 页面完成授权（微信扫码 / 手机号 / 邮箱），成功后自动拉取 glm-5.2 / kimi-k2.7 / deepseek-v4 等模型。') + '</div>' : '';
   const paidBox = isBailian ?
     '<label class="paid-box'+(p.allow_paid?' on':'')+'" title="勾选后：测试与轮询可使用无免费额度的模型（会计费）。默认不勾选＝只用免费额度。">' +
     '<input type="checkbox" '+(p.allow_paid?'checked ':'')+'onchange="togglePaid(\''+p.id+'\', this.checked)">允许付费调用</label>' : '';
@@ -484,7 +480,7 @@ function renderProvider(p, forceOpen){
     '<span class="q-num">已隐藏无免费额度 '+hiddenCnt+' 个</span>' : '';
   const quotaNote = isBailian ? '<span class="chip '+(nFree?'ok':'bad')+'">有免费额度 '+nFree+' / '+models.length+'</span>' : '';
 
-  return '<div class="card">' + head + wbHint +
+  return '<div class="card">' + head + authBoxHtml(p, false) + wbHint +
     '<div class="p-meta">' +
       '<span>URL <code>'+esc(effUrl(p.base_url))+'</code> <button class="small" onclick="cp(\''+esc(effUrl(p.base_url))+'\')">复制</button></span>' +
       '<span>Key <code id="key-'+p.id+'">'+esc(maskKey(p.api_key))+'</code> ' +
@@ -669,6 +665,40 @@ function renderTiles(){
   t.innerHTML = h;
 }
 
+// ---------------- 卡片内「配置与授权」展开面板（登录入口下沉 · 方案 D） ----------------
+function authBoxHtml(p, withKey){
+  const isBailian = p.type === 'bailian';
+  const isAg = isAgProvider(p);
+  const isWb = isWbProvider(p);
+  const wbst = STATE.wb_status || {};
+  let status = '';
+  let btns = '';
+  if(isBailian){
+    status = '<span class="q-num">控制台授权与免费额度同步（bl 账号级，对本机所有百炼渠道生效）</span>';
+    btns = '<button class="small auth-bl" onclick="startBlAuth(this)">授权百炼控制台</button>' +
+           '<button class="small" onclick="syncQuota()">同步百炼额度</button>';
+  } else if(isAg){
+    status = '<span class="q-num">Google 账号授权反代（5 小时 / 每周组额度）</span>';
+    btns = '<button class="small auth-ag" onclick="startAgAuth(this)">授权反重力 Google</button>';
+  } else if(isWb){
+    status = '<span class="chip '+(wbst.logged_in?'ok':'bad')+'">'+(wbst.logged_in?'已登录':'未登录')+'</span>' +
+             '<span class="q-num">腾讯 CodeBuddy 授权（微信扫码 / 手机号 / 邮箱）</span>';
+    btns = '<button class="small auth-wb" onclick="startWbAuth(this)">'+(wbst.logged_in?'重新登录':'登录 WorkBuddy')+'</button>';
+  } else {
+    status = '<span class="q-num">'+esc(provKindName(p))+' · 接入参数如下</span>';
+  }
+  let keyRows = '';
+  if(withKey){
+    const eu = effUrl(p.base_url);
+    keyRows = '<div class="quota-line"><span class="ag-wname" style="min-width:36px">URL</span>' +
+      '<code>'+esc(eu)+'</code><button class="small" onclick="cp(\''+esc(eu)+'\')">复制</button></div>' +
+      '<div class="quota-line"><span class="ag-wname" style="min-width:36px">Key</span>' +
+      '<code>'+esc(maskKey(p.api_key))+'</code><button class="small" onclick="cp(\''+esc(p.api_key)+'\')">复制</button></div>';
+  }
+  return '<details class="authbox"><summary>配置与授权</summary>' +
+    '<div class="auth-in">'+status+btns+'</div>' + keyRows + '</details>';
+}
+
 // ---------------- 总览：渠道面板网格 ----------------
 function renderPanels(){
   const g = $('#panels');
@@ -686,6 +716,7 @@ function renderPanels(){
       '<div class="pv-line">当前模型 <b>'+esc(p.active_model||'未选择')+'</b></div>' +
       '<div class="pv-line">已勾选 <b>'+enabledCount(p)+' / '+(p.models||[]).length+'</b>'+provQuotaLine(p)+'</div>' +
       '<div class="pv-line">URL <code>'+esc(eu)+'</code><button class="small" onclick="cp(\''+esc(eu)+'\')">复制</button></div>' +
+      authBoxHtml(p, true) +
       '<div class="pv-foot"><button class="pv-go" onclick="openProvider(\''+p.id+'\')">进入管理 ›</button></div>' +
       '</div>';
   }).join('');
@@ -746,10 +777,10 @@ function render(){
     });
     $('#quotaSummary').innerHTML = lines.length ? lines.join('<br>') : '已同步，但未解析到条目（见下方原始返回）。';
   } else {
-    let msg = '尚未同步。点击右上角「同步百炼额度」。';
+    let msg = '尚未同步。在百炼渠道卡片的「配置与授权」里点「同步百炼额度」。';
     let cls = 'chip';
     if(q.last_error === 'console_login_required'){
-      msg = '需要一次性控制台授权：点右上角「授权百炼控制台」，浏览器会打开阿里云登录页，登录完成后额度会自动同步，以后不用再授权。';
+      msg = '需要一次性控制台授权：展开百炼渠道卡片的「配置与授权」，点「授权百炼控制台」，浏览器会打开阿里云登录页，登录完成后额度会自动同步，以后不用再授权。';
       cls = 'chip warn';
     } else if(q.last_error === 'bl_missing'){
       msg = '未检测到百炼 CLI（bl），请先安装：npm install -g bailian-cli';
@@ -964,15 +995,17 @@ async function syncQuota(){
     const r = await api('/api/quota/refresh', 'POST', {});
     if(r.ok) toast('额度已同步，共 ' + r.count + ' 个模型条目');
     else if(r.state === 'console_login_required')
-      toast('需要控制台授权：点右上角「授权百炼控制台」按钮，在浏览器里登录即可', true);
+      toast('需要控制台授权：在百炼渠道卡片的「配置与授权」里点「授权百炼控制台」，在浏览器里登录即可', true);
     else toast(r.message || '同步失败', true);
   }catch(e){ toast('同步失败：' + e.message, true); }
   await load();
 }
 
-let _authPoll = null;
-async function startBlAuth(){
-  const btn = $('#authBtn');
+let _authPoll = null, _blBtnEl = null;
+async function startBlAuth(btn){
+  btn = btn || document.querySelector('.auth-bl');
+  if(!btn) return;
+  _blBtnEl = btn;
   btn.disabled = true;
   try{
     const r = await api('/api/bl/login', 'POST', {});
@@ -991,9 +1024,8 @@ async function pollBlAuth(){
     const s = await api('/api/bl/login/status');
     if(s.running) return;
     clearInterval(_authPoll); _authPoll = null;
-    const btn = $('#authBtn');
-    btn.disabled = false;
-    btn.textContent = '授权百炼控制台';
+    const btn = _blBtnEl;
+    if(btn){ btn.disabled = false; btn.textContent = '授权百炼控制台'; }
     const qs = s.quota_sync;
     if(qs && qs.ok){
       toast('授权成功，额度已自动同步（' + qs.count + ' 个条目）');
@@ -1007,9 +1039,11 @@ async function pollBlAuth(){
 }
 
 // ---------------- 反重力（Google Antigravity）授权 ----------------
-let _agPoll = null;
-async function startAgAuth(){
-  const btn = $('#agBtn');
+let _agPoll = null, _agBtnEl = null;
+async function startAgAuth(btn){
+  btn = btn || document.querySelector('.auth-ag');
+  if(!btn) return;
+  _agBtnEl = btn;
   btn.disabled = true;
   try{
     const r = await api('/api/ag/login', 'POST', {});
@@ -1028,9 +1062,8 @@ async function pollAgAuth(){
     const s = await api('/api/ag/login/status');
     if(s.running) return;
     clearInterval(_agPoll); _agPoll = null;
-    const btn = $('#agBtn');
-    btn.disabled = false;
-    btn.textContent = '授权反重力 Google';
+    const btn = _agBtnEl;
+    if(btn){ btn.disabled = false; btn.textContent = '授权反重力 Google'; }
     const hr = s.hub_refresh;
     if(s.models_count > 0){
       toast('反重力授权成功，反代可用模型 ' + s.models_count + ' 个' + (hr && hr.refreshed ? '，渠道已自动刷新' : ''));
@@ -1042,9 +1075,11 @@ async function pollAgAuth(){
 }
 
 // ---------------- WorkBuddy（腾讯 CodeBuddy）反代登录 ----------------
-let _wbPoll = null;
-async function startWbAuth(){
-  const btn = $('#wbBtn');
+let _wbPoll = null, _wbBtnEl = null;
+async function startWbAuth(btn){
+  btn = btn || document.querySelector('.auth-wb');
+  if(!btn) return;
+  _wbBtnEl = btn;
   btn.disabled = true;
   try{
     const r = await api('/api/wb/login', 'POST', {});
@@ -1064,9 +1099,9 @@ async function pollWbAuth(){
     const s = await api('/api/wb/login/status');
     if(s.running) return;
     clearInterval(_wbPoll); _wbPoll = null;
-    const btn = $('#wbBtn');
-    btn.disabled = false;
-    btn.textContent = '登录 WorkBuddy';
+    const btn = _wbBtnEl;
+    const wbOk = (STATE.wb_status || {}).logged_in;
+    if(btn){ btn.disabled = false; btn.textContent = wbOk ? '重新登录' : '登录 WorkBuddy'; }
     if(s.status === 'ok'){
       const hr = s.hub_refresh;
       toast('WorkBuddy 登录成功，反代可用模型 ' + (s.models_count || 0) + ' 个' + (hr && hr.refreshed ? '，渠道已自动刷新' : ''));
