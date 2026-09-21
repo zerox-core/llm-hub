@@ -193,6 +193,21 @@ function fmtReset(iso){
 }
 
 function quotaCell(m, isBailian, p){
+  if(p && isWbProvider(p)){
+    const wq = STATE.wb_quota || {};
+    const rates = wq.rates || {};
+    if(!wq.synced_at || !Object.keys(rates).length) return '<span class="q-num">积分未同步</span>';
+    if(m in rates){
+      const rv = rates[m];
+      if(rv === 'auto') return '<span class="chip">倍率浮动</span> <span class="q-num">auto 自动路由，按实际命中模型计</span>';
+      const num = Number(rv);
+      if(rv === 'unknown' || !isFinite(num)) return '<span class="chip">倍率未知</span> <span class="q-num">官方未标注</span>';
+      return '<span class="chip '+(num===0?'ok':'')+'">倍率 x'+num+'</span>' +
+        (num===0 ? ' <span class="q-num">限免中 · 不扣积分</span>'
+                 : ' <span class="q-num">积分 = 用量 × '+num+'</span>');
+    }
+    return '<span class="chip" title="该模型经反重力（AG）账号反代路由，不消耗 CodeBuddy 积分">AG 路由</span> <span class="q-num">不耗积分</span>';
+  }
   if(p && isAgProvider(p)){
     const info = agGroupInfo(m);
     if(info.state === 'cooldown')
@@ -291,6 +306,38 @@ function renderAgQuota(p){
     inner + syncLine + '</div>';
 }
 
+function renderWbQuota(p){
+  const wq = STATE.wb_quota || {};
+  const accounts = wq.accounts || [];
+  let inner = '';
+  if(!accounts.length){
+    inner = '<div class="quota-line">尚未同步 CodeBuddy 积分（多个积分包按最早到期优先扣减）。</div>';
+  } else {
+    accounts.forEach(a => {
+      if(a.error){
+        inner += '<div class="quota-line" style="color:var(--bad)">'+esc(a.nickname||a.auth_index||'账号')+'：同步失败 '+esc(a.error)+'</div>';
+        return;
+      }
+      const c = a.credits || {};
+      const pct = (c.total_size > 0) ? Math.max(0, Math.min(100, c.total_remain / c.total_size * 100)) : null;
+      const cls = pct === null ? '' : (pct < 10 ? 'bad' : (pct < 30 ? 'warn' : ''));
+      const bar = pct === null ? '' : '<span class="quota-bar"><i class="'+cls+'" style="width:'+pct.toFixed(1)+'%"></i></span>';
+      inner += '<div class="quota-line"><b>'+esc(a.nickname||'CodeBuddy 账号')+'</b>' + bar +
+        '<span class="q-num">剩 '+fmtNum(c.total_remain)+' / '+fmtNum(c.total_size)+' 积分 · 已用 '+fmtNum(c.total_used)+'</span></div>';
+      (c.packages||[]).forEach(pk => {
+        inner += '<div class="quota-line"><span class="ag-wname">'+esc(pk.name||'积分包')+'</span>' +
+          '<span class="q-num">剩 '+fmtNum(pk.remain)+' / '+fmtNum(pk.size) +
+          (pk.cycle_end ? ' · '+esc(String(pk.cycle_end).slice(5,10))+' 到期' : '') + '</span></div>';
+      });
+    });
+  }
+  const syncLine = '<div class="quota-line"><span class="q-num">'+(wq.synced_at ? '同步于 '+esc(wq.synced_at.slice(5,16)) : '')+'</span>' +
+    '<button class="small" onclick="syncWbQuota()">同步积分</button></div>';
+  return '<div class="ag-quota"><div class="quota-line"><b>CodeBuddy 积分</b>' +
+    '<span class="q-num">按模型倍率 ×用量扣积分；多个积分包按最早到期优先扣减，海外模型经 AG 路由不耗积分</span></div>' +
+    inner + syncLine + '</div>';
+}
+
 function poolSwitchSel(p){
   const pools = STATE.pools || [];
   if(pools.length <= 1) return '';
@@ -367,7 +414,7 @@ function renderProvider(p){
 
   const fetchErr = p.fetch_error ? '<div class="quota-line" style="color:var(--bad)">'+esc(p.fetch_error)+'</div>' : '';
   const wbHint = isWb ? '<div class="quota-line">' + (wbst.logged_in
-    ? '已通过 CodeBuddy 账号登录反代（workbuddy 插件）；点「刷新模型列表」拉取 glm-5 / kimi / minimax / hy3 / deepseek-v4 系列模型。'
+    ? '已通过 CodeBuddy 账号登录反代；「刷新模型列表」拉取模型，「同步积分」更新积分余额与每模型使用倍率。'
     : '尚未登录：点右上角「登录 WorkBuddy」，在打开的腾讯 CodeBuddy 页面完成授权（微信扫码 / 手机号 / 邮箱），成功后自动拉取 glm-5.2 / kimi-k2.7 / deepseek-v4 等模型。') + '</div>' : '';
   const paidBox = isBailian ?
     '<label class="paid-box'+(p.allow_paid?' on':'')+'" title="勾选后：测试与轮询可使用无免费额度的模型（会计费）。默认不勾选＝只用免费额度。">' +
@@ -390,6 +437,7 @@ function renderProvider(p){
     '<div class="p-ops">' +
       '<button class="small" onclick="refreshModels(\''+p.id+'\')">刷新模型列表</button>' +
       (isAg ? '<button class="small" title="同步反重力 5 小时 / 每周额度（不消耗对话额度）" onclick="syncAgQuota()">同步额度</button>' : '') +
+      (isWb ? '<button class="small" title="同步 CodeBuddy 积分与每模型使用倍率（不消耗积分）" onclick="syncWbQuota()">同步积分</button>' : '') +
       '<button class="small" title="勾选本渠道全部模型（进入可调列表）" onclick="bulkEnable(\''+p.id+'\', true)">全选模型</button>' +
       '<button class="small" title="取消勾选本渠道全部模型（退出可调列表与轮询）" onclick="bulkEnable(\''+p.id+'\', false)">全不选</button>' +
       '<button class="small" onclick="testModel(\''+p.id+'\',\''+esc(p.active_model||'')+'\')">测试当前模型</button>' +
@@ -399,7 +447,7 @@ function renderProvider(p){
       '<button class="small danger" onclick="delProvider(\''+p.id+'\',\''+esc(p.name)+'\')">删除渠道</button>' +
       paidBox + freeOnlyBox + hiddenHint +
     '</div>' +
-    (isAg ? renderAgQuota(p) : '') +
+    (isAg ? renderAgQuota(p) : (isWb ? renderWbQuota(p) : '')) +
     (viewModels.length ? '<div class="order-hint">勾选 = 模型进入可调列表（auto 轮询与 Harness 单选都只用已勾选模型）；轮询按下列顺序进行（↑↓ 调整）。</div>' : '') +
     fetchErr +
     (viewModels.length ? catHtml :
@@ -801,6 +849,31 @@ async function load(){
       }
     }
   }catch(e){}
+  // CodeBuddy 积分超过 10 分钟未同步 → 后台同步一次再重渲染（只查计量接口，不消耗积分）
+  try{
+    const hasWb = (STATE.providers||[]).some(isWbProvider);
+    if(hasWb && (STATE.wb_status||{}).logged_in && !window._wbSyncing){
+      const st2 = (STATE.wb_quota||{}).synced_at || '';
+      const tSrv2 = Date.parse((STATE.server_time||'').replace(' ','T'));
+      const tSyn2 = st2 ? Date.parse(st2.replace(' ','T')) : 0;
+      if(!st2 || (tSrv2 - tSyn2) > 600000){
+        window._wbSyncing = true;
+        api('/api/wb/quota/refresh', 'POST', {})
+          .then(()=>{ window._wbSyncing = false; load(); })
+          .catch(()=>{ window._wbSyncing = false; });
+      }
+    }
+  }catch(e){}
+}
+
+async function syncWbQuota(){
+  toast('正在同步 CodeBuddy 积分…');
+  try{
+    const r = await api('/api/wb/quota/refresh', 'POST', {});
+    if(r.ok) toast('已同步积分（'+(r.accounts||0)+' 账号 · '+(r.rates||0)+' 模型倍率）');
+    else toast('同步失败' + (r.error ? '：'+r.error : (r.rate_error ? '：'+r.rate_error : '')), true);
+  }catch(e){ toast('同步失败：' + e.message, true); }
+  await load();
 }
 
 async function syncAgQuota(){

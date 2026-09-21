@@ -9,6 +9,7 @@ v3 新增：
 - bl usage freetier 试用完即停开关
 """
 import datetime
+import glob
 import json
 import os
 import re
@@ -115,6 +116,7 @@ def load_data():
         d.setdefault("providers", [])
         d.setdefault("quota", {"synced_at": None, "entries": {}, "raw": None, "last_error": None})
         d.setdefault("ag_quota", {"accounts": [], "synced_at": "", "groups": {}})
+        d.setdefault("wb_quota", {"accounts": [], "rates": {}, "synced_at": ""})
         d.setdefault("hub_key", "")
         d.setdefault("harness_model", "auto")       # Harness 模型选择：auto=轮询 / 具体模型=锁定
         d.setdefault("autostart_harness", True)     # 启动器联动：Hub 启动后自动拉起 dsh
@@ -675,6 +677,7 @@ def state():
         "providers": d["providers"],
         "quota": d["quota"],
         "ag_quota": d.get("ag_quota") or {"accounts": [], "synced_at": "", "groups": {}},
+        "wb_quota": d.get("wb_quota") or {"accounts": [], "rates": {}, "synced_at": ""},
         "bl_installed": bool(bl),
         "hub_base": HUB_BASE,
         "hub_key": get_hub_key(d),
@@ -1341,24 +1344,113 @@ def _wb_mgmt_get(path, timeout=15.0):
                        headers={"X-Management-Key": key})
 
 
+def _wb_auth_files():
+    """插件 v0.8.5 起凭证按 uid 分文件存：workbuddy-<uid>.json；兼容旧版 workbuddy.json"""
+    out = sorted(glob.glob(os.path.join(AG_AUTH_DIR, "workbuddy-*.json")))
+    if os.path.exists(WB_AUTH_FILE):
+        out.append(WB_AUTH_FILE)
+    return out
+
+
 def wb_auth_exists():
-    return os.path.exists(WB_AUTH_FILE)
+    return bool(_wb_auth_files())
 
 
 def wb_account_info():
-    """workbuddy.json 的脱敏摘要（只取白名单字段，绝不外带 token）"""
-    if not wb_auth_exists():
+    """凭证文件的脱敏摘要（只取昵称/uid 等白名单字段，绝不外带 token）"""
+    files = _wb_auth_files()
+    if not files:
         return None
     try:
-        with open(WB_AUTH_FILE, encoding="utf-8") as f:
+        with open(files[0], encoding="utf-8") as f:
             d = json.load(f)
         if isinstance(d, dict):
-            info = {k: d[k] for k in ("email", "account", "user", "name", "type")
-                    if k in d}
-            return info or {"file": "workbuddy.json"}
+            acc, auth = d.get("account") or {}, d.get("auth") or {}
+            info = {"nickname": acc.get("nickname"), "uid": acc.get("uid"),
+                    "domain": auth.get("domain")}
+            info = {k: v for k, v in info.items() if v}
+            if info:
+                return info
     except Exception:
         pass
-    return {"file": "workbuddy.json"}
+    return {"file": os.path.basename(files[0])}
+
+
+def wb_model_rates():
+    """拉 CodeBuddy 官方目录的每模型积分倍率（只读目录接口，不消耗积分）。
+    返回 {model_id: 倍率 float}，未标倍率的自动路由模型为 "auto"。"""
+    files = _wb_auth_files()
+    if not files:
+        return {}
+    with open(files[0], encoding="utf-8") as f:
+        sa = json.load(f)
+    auth, acc = sa.get("auth") or {}, sa.get("account") or {}
+    tok = auth.get("accessToken") or ""
+    if not tok:
+        return {}
+    headers = {
+        "Authorization": "Bearer " + tok,
+        "X-User-Id": acc.get("uid") or "",
+        "X-Product": "SaaS",
+        "X-IDE-Type": "CLI",
+        "X-IDE-Name": "CLI",
+        "Accept": "application/json",
+        "Origin": "https://copilot.tencent.com",
+        "Referer": "https://copilot.tencent.com/",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) CodeBuddy/1.0",
+    }
+    if auth.get("domain"):
+        headers["X-Domain"] = auth["domain"]
+    with httpx.Client(timeout=20.0, trust_env=False) as cli:
+        r = cli.get("https://copilot.tencent.com/console/enterprises/personal/models",
+                    headers=headers)
+    r.raise_for_status()
+    models = (r.json().get("data") or {}).get("models") or []
+    rates = {}
+    for m in models:
+        mid, c = str(m.get("id") or ""), m.get("credits")
+        if not mid:
+            continue
+        if not c:
+            rates[mid] = "auto"          # 官方未标倍率 = 浮动 / 自动路由
+            continue
+        mm = re.match(r"x\s*([0-9]+(?:\.[0-9]+)?)", str(c).strip())
+        rates[mid] = float(mm.group(1)) if mm else "unknown"
+    return rates
+
+
+@app.post("/api/wb/quota/refresh")
+def wb_quota_refresh():
+    """同步 CodeBuddy 积分（插件管理口实时查，不消耗积分）+ 每模型使用倍率。"""
+    d = load_data()
+    out = {"ok": False, "accounts": 0, "rates": 0}
+    accounts = []
+    try:
+        r = _wb_mgmt_get("/plugins/workbuddy/credits", timeout=40.0)
+        if r.status_code == 200:
+            accounts = (r.json() or {}).get("accounts") or []
+            out["ok"] = True
+            out["accounts"] = len(accounts)
+        else:
+            out["error"] = "积分接口 HTTP %s：%s" % (r.status_code, r.text[:150])
+    except HTTPException:
+        raise
+    except Exception as e:
+        out["error"] = str(e)[:200]
+    rates = {}
+    try:
+        rates = wb_model_rates()
+        out["rates"] = len(rates)
+    except Exception as e:
+        out["rate_error"] = str(e)[:200]
+    wq = d.setdefault("wb_quota", {"accounts": [], "rates": {}, "synced_at": ""})
+    wq["accounts"] = accounts
+    if rates:
+        wq["rates"] = rates
+    wq["synced_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    save_data(d)
+    out["synced_at"] = wq["synced_at"]
+    return out
 
 
 def wb_models_count():
