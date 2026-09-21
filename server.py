@@ -244,7 +244,7 @@ AG_UA = "antigravity/1.11.5 windows/amd64"
 
 # WorkBuddy（腾讯 CodeBuddy）反代：与 AG 共用本地 cli-proxy-api（:8317），
 # Hub 渠道用 kind="wb" 标记区分；模型前缀用于从 8317 模型列表里分拣 wb 模型。
-WB_MODEL_PREFIXES = ("glm-5", "kimi", "minimax", "hy3", "deepseek-v4")
+WB_MODEL_PREFIXES = ("glm-5", "kimi", "minimax", "hy3", "hy4", "deepseek-v4")
 WB_AUTH_FILE = os.path.join(AG_AUTH_DIR, "workbuddy.json")
 
 

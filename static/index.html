@@ -207,7 +207,7 @@ function quotaCell(m, isBailian, p){
                  : ' <span class="q-num">积分 = 用量 × '+num+'</span>');
     }
     // WB 自家模型（前缀匹配）但官方目录未收录 → 倍率未收录；海外模型才标 AG 路由
-    const wbPrefixes = ['glm-5','kimi','minimax','hy3','deepseek-v4'];
+    const wbPrefixes = ['glm-5','kimi','minimax','hy3','hy4','deepseek-v4'];
     if(wbPrefixes.some(pf => m.startsWith(pf))){
       return '<span class="chip">倍率未收录</span> <span class="q-num">官方倍率目录暂无此模型</span>';
     }
