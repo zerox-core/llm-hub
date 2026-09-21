@@ -758,6 +758,11 @@ def refresh_models(pid: str):
         save_data(d)
         return {"ok": False, "message": str(e)}
     p["base_url"] = eff
+    # 渠道身份过滤：WB 卡只留 WB 自家模型；AG(8317 非 wb)卡排除 WB 模型，两卡各管各的
+    if p.get("kind") == "wb":
+        ids = [m for m in ids if str(m).startswith(WB_MODEL_PREFIXES)]
+    elif "8317" in (p.get("base_url") or ""):
+        ids = [m for m in ids if not str(m).startswith(WB_MODEL_PREFIXES)]
     p["models"] = ids
     p["last_refresh"] = time.strftime("%Y-%m-%d %H:%M:%S")
     p["fetch_error"] = None
