@@ -23,6 +23,8 @@ import time
 import uuid
 from pathlib import Path
 
+import yaml
+
 import httpx
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
@@ -104,6 +106,22 @@ def _migrate_pools(d):
     for p in d.get("providers", []):
         if p.get("pool_id") not in ids:
             p["pool_id"] = default_id
+
+
+def _pool_new_key():
+    return "pool-" + secrets.token_urlsafe(18)
+
+
+def _ensure_pool_keys(d):
+    """号池 key 惰性生成（老数据迁移补齐）；有新建则落盘。"""
+    changed = False
+    for pl in d.get("pools") or []:
+        if not pl.get("key"):
+            pl["key"] = _pool_new_key()
+            changed = True
+    if changed:
+        save_data(d)
+    return changed
 
 
 def load_data():
@@ -463,6 +481,31 @@ def find_model_provider(d, model):
         if model in (p.get("models") or []):
             return p
     return None
+
+
+def pool_scope_candidates(d, pl, extra_cats=None):
+    """号池 key 的候选 (provider, model) 对：
+    模型粒度号池（pool.models 非空）= 勾选的模型；渠道粒度号池 = 池内全部渠道的可对话模型。
+    extra_cats 仅列表/显式调用校验时放行（如图像生成）；auto 轮询不传。"""
+    out = []
+    if pl.get("models"):
+        provs = {p["id"]: p for p in d["providers"]}
+        for item in pl["models"]:
+            pid, _, m = str(item or "").partition("::")
+            p = provs.get(pid)
+            if not p or not p.get("base_url"):
+                continue
+            if m in chat_candidates(d, p, extra_cats=extra_cats):
+                out.append((p, m))
+        return out
+    for p in d["providers"]:
+        if p.get("pool_id") == pl["id"] and p.get("base_url"):
+            out.extend((p, m) for m in chat_candidates(d, p, extra_cats=extra_cats))
+    return out
+
+
+def pool_scope_set(d, pl, extra_cats=None):
+    return {(p["id"], m) for p, m in pool_scope_candidates(d, pl, extra_cats=extra_cats)}
 
 
 # ---------------- 模型列表拉取（OpenAI 兼容） ----------------
@@ -894,11 +937,15 @@ def test(pid: str, inp: ModelIn):
 
 class PoolIn(BaseModel):
     name: str
+    models: list[str] | None = None     # 模型粒度成员：["渠道id::模型id", ...]
 
 
 class PoolUpdate(BaseModel):
     name: str | None = None
     provider_id: str | None = None      # 把该渠道移入本号池
+    reset_key: bool = False             # 重置号池 key（旧 key 立即失效）
+    models: list[str] | None = None     # 更新模型粒度成员
+    clear_models: bool = False          # 清掉模型粒度成员，改回渠道粒度
 
 
 class EnabledIn(BaseModel):
@@ -911,16 +958,36 @@ class EnabledBulkIn(BaseModel):
     models: list[str] | None = None     # None = 本渠道全部模型
 
 
+def _norm_pool_models(d, items):
+    """规范化模型粒度成员：["渠道id::模型id"]；校验渠道与模型存在。"""
+    provs = {p["id"]: p for p in d["providers"]}
+    out = []
+    for it in items or []:
+        pid, _, m = str(it or "").partition("::")
+        p = provs.get(pid)
+        if not p:
+            raise HTTPException(400, "渠道不存在：%s" % pid)
+        if m not in (p.get("models") or []):
+            raise HTTPException(400, "渠道 %s 下没有模型 %s" % (p.get("name"), m))
+        if it not in out:
+            out.append(it)
+    return out
+
+
 def _pool_view(d):
+    _ensure_pool_keys(d)
     out = []
     for pl in d.get("pools") or []:
         provs = [p for p in d["providers"] if p.get("pool_id") == pl["id"]]
         out.append({"id": pl["id"], "name": pl.get("name") or pl["id"],
+                    "key": pl.get("key") or "",
+                    "models": pl.get("models") or [],
                     "providers": [p["id"] for p in provs]})
     known = {pl["id"] for pl in d.get("pools") or []}
     rest = [p for p in d["providers"] if p.get("pool_id") not in known]
     if rest:
-        out.append({"id": "", "name": "未分组", "providers": [p["id"] for p in rest]})
+        out.append({"id": "", "name": "未分组", "key": "", "models": [],
+                    "providers": [p["id"] for p in rest]})
     return out
 
 
@@ -933,11 +1000,16 @@ def list_pools():
 @app.post("/api/pools")
 def add_pool(inp: PoolIn):
     d = load_data()
+    _ensure_pool_keys(d)
     pl = {"id": "pool_" + uuid.uuid4().hex[:8],
           "name": inp.name.strip() or "未命名号池",
+          "key": _pool_new_key(),
           "created_at": time.strftime("%Y-%m-%d %H:%M:%S")}
+    if inp.models is not None:
+        pl["models"] = _norm_pool_models(d, inp.models)
     d["pools"].append(pl)
     save_data(d)
+    _dsh_sync_pools(load_data())
     return pl
 
 
@@ -949,13 +1021,20 @@ def update_pool(pool_id: str, inp: PoolUpdate):
         raise HTTPException(404, "pool not found")
     if inp.name is not None:
         pl["name"] = inp.name.strip() or pl["name"]
+    if inp.reset_key:
+        pl["key"] = _pool_new_key()
+    if inp.models is not None:
+        pl["models"] = _norm_pool_models(d, inp.models)
+    if inp.clear_models:
+        pl.pop("models", None)
     if inp.provider_id:
         p = next((x for x in d["providers"] if x["id"] == inp.provider_id), None)
         if not p:
             raise HTTPException(404, "provider not found")
         p["pool_id"] = pool_id
     save_data(d)
-    return {"ok": True}
+    _dsh_sync_pools(load_data())
+    return {"ok": True, "key": pl.get("key")}
 
 
 @app.delete("/api/pools/{pool_id}")
@@ -972,6 +1051,7 @@ def delete_pool(pool_id: str):
         if p.get("pool_id") == pool_id:
             p["pool_id"] = default_id
     save_data(d)
+    _dsh_sync_pools(load_data())
     return {"ok": True}
 
 
@@ -984,6 +1064,7 @@ def set_model_enabled(pid: str, inp: EnabledIn):
     elif inp.model not in dis:
         dis.append(inp.model)
     save_data(d)
+    _dsh_settings_refresh(d)
     return {"ok": True, "enabled": inp.enabled}
 
 
@@ -998,6 +1079,7 @@ def set_models_enabled_bulk(pid: str, inp: EnabledBulkIn):
         dis |= set(targets)
     p["disabled_models"] = sorted(dis)
     save_data(d)
+    _dsh_settings_refresh(d)
     return {"ok": True, "disabled": len(p["disabled_models"])}
 
 
@@ -1615,11 +1697,18 @@ def _pick_provider(d, req):
 
 
 def _require_hub_key(d, req):
-    key = get_hub_key(d)
+    """鉴权：Hub 统一 key = 全池权限；号池 key = 仅该号池范围。
+    返回命中的号池 dict（全池权限时为 None）。"""
     auth = req.headers.get("authorization") or ""
-    if auth != "Bearer " + key:
-        raise HTTPException(status_code=401,
-                            detail="未授权：请携带 Hub 统一 key（Authorization: Bearer <hub_key>，见 Hub 面板顶部）。")
+    key = auth[7:].strip() if auth.startswith("Bearer ") else ""
+    if key and key == get_hub_key(d):
+        return None
+    if key:
+        for pl in d.get("pools") or []:
+            if pl.get("key") and key == pl["key"]:
+                return pl
+    raise HTTPException(status_code=401,
+                        detail="未授权：请携带 Hub 统一 key（全池）或号池 key（Authorization: Bearer <key>）。")
 
 
 @app.get("/v1/models")
@@ -1627,9 +1716,17 @@ def hub_models(req: Request):
     """统一模型清单：auto + 各渠道可对话模型 + 图像生成模型（供标准客户端拉列表，需 hub_key）。
     图像生成模型只在列表中可见、可显式指定调用；不进入 auto 轮询。"""
     d = load_data()
-    _require_hub_key(d, req)
+    scope = _require_hub_key(d, req)
     data = [{"id": "auto", "object": "model", "owned_by": "llm-hub"}]
     seen = {"auto"}
+    if scope is not None:
+        for p, m in pool_scope_candidates(d, scope, extra_cats={"图像生成"}):
+            if m in seen:
+                continue
+            seen.add(m)
+            data.append({"id": m, "object": "model",
+                         "owned_by": scope.get("name") or "pool"})
+        return {"object": "list", "data": data}
     for p in d["providers"]:
         for m in chat_candidates(d, p, extra_cats={"图像生成"}):
             if m in seen:
@@ -1651,12 +1748,13 @@ async def hub_chat(req: Request):
     响应头 X-Hub-Provider / X-Hub-Model 标明实际命中的渠道与模型。"""
     body = await req.json()
     d = load_data()
-    _require_hub_key(d, req)
+    scope = _require_hub_key(d, req)
     model = body.get("model") or "auto"
     stream = bool(body.get("stream"))
 
-    # Harness 模型选择：锁定具体模型时，model=auto 的请求固定走该模型（不再轮询）
-    if model == "auto" and not req.headers.get("x-hub-provider"):
+    # Harness 模型选择：锁定具体模型时，model=auto 的请求固定走该模型（不再轮询）。
+    # 号池 key 的请求不受全局锁定影响（锁定是 Harness 全池面板的选择）。
+    if model == "auto" and not req.headers.get("x-hub-provider") and scope is None:
         pin = (d.get("harness_model") or "auto").strip()
         if pin and pin != "auto":
             _pp = find_model_provider(d, pin)
@@ -1673,15 +1771,28 @@ async def hub_chat(req: Request):
     if req.headers.get("x-hub-provider"):
         p = _pick_provider(d, req)
         scoped = [(p, m) for m in (chat_candidates(d, p) if model == "auto" else [model])]
+        if scope is not None:
+            allowed = pool_scope_set(d, scope)
+            scoped = [(p, m) for (p, m) in scoped if (p["id"], m) in allowed]
     elif model == "auto":
-        scoped = all_chat_candidates(d)
+        scoped = pool_scope_candidates(d, scope) if scope is not None else all_chat_candidates(d)
     else:
         p = find_model_provider(d, model)
         if p is None:
+            if scope is not None:
+                raise HTTPException(404, "模型 %s 不在号池「%s」范围内" % (model, scope.get("name")))
             if not d["providers"]:
                 raise HTTPException(400, "还没有任何渠道，请先打开 Hub 页面添加")
             p = d["providers"][0]
         scoped = [(p, model)]
+        if scope is not None and (p["id"], model) not in pool_scope_set(d, scope, extra_cats={"图像生成"}):
+            log_call({"source": "proxy", "provider": p.get("name"),
+                      "model_requested": model, "model_used": model,
+                      "ok": False, "blocked": True, "latency_ms": 0,
+                      "error": "号池范围拦截：" + model})
+            return JSONResponse(status_code=403, content={"error": {
+                "message": "模型 %s 不在号池「%s」范围内，已拦截。" % (model, scope.get("name")),
+                "type": "hub_pool_scope"}})
 
     if model == "auto":
         if not scoped:
@@ -1689,6 +1800,10 @@ async def hub_chat(req: Request):
                       "model_requested": "auto", "model_used": None,
                       "ok": False, "blocked": True, "latency_ms": 0,
                       "error": "没有可调用的免费额度模型"})
+            if scope is not None:
+                return JSONResponse(status_code=403, content={"error": {
+                    "message": "号池「%s」内没有可调用的模型（未勾选模型 / 全部无免费额度 / 渠道为空）。" % scope.get("name"),
+                    "type": "hub_pool_empty"}})
             return JSONResponse(status_code=403, content={"error": {
                 "message": "没有可调用的免费额度模型（全部无额度/耗尽/过期）。如确认付费调用，请在 Hub 页面勾选「允许付费」。",
                 "type": "hub_no_free_model"}})
@@ -1825,13 +1940,19 @@ async def _forward_stream(p, body, model, model_requested=None):
 # ---------------- Claude Code 适配（Anthropic Messages API） ----------------
 
 def _require_hub_key_anth(d, req):
-    key = get_hub_key(d)
+    """同 _require_hub_key，另接受 x-api-key；返回号池 scope（全池为 None）。"""
     auth = req.headers.get("authorization") or ""
     xkey = req.headers.get("x-api-key") or ""
-    if auth != "Bearer " + key and xkey != key:
-        raise HTTPException(status_code=401, detail={
-            "type": "error", "error": {"type": "authentication_error",
-            "message": "invalid x-api-key / bearer token（用 Hub 统一 key，见面板顶栏）"}})
+    key = auth[7:].strip() if auth.startswith("Bearer ") else xkey.strip()
+    if key and key == get_hub_key(d):
+        return None
+    if key:
+        for pl in d.get("pools") or []:
+            if pl.get("key") and key == pl["key"]:
+                return pl
+    raise HTTPException(status_code=401, detail={
+        "type": "error", "error": {"type": "authentication_error",
+        "message": "invalid x-api-key / bearer token（用 Hub 统一 key（全池）或号池 key）"}})
 
 
 def _anth_to_openai(body):
@@ -2045,11 +2166,11 @@ async def anth_messages(req: Request):
     model 不在任何渠道列表时自动落到 auto（跨渠道轮动）；支持 tools / system / 流式。"""
     body = await req.json()
     d = load_data()
-    _require_hub_key_anth(d, req)
+    scope = _require_hub_key_anth(d, req)
     model = body.get("model") or "auto"
     if find_model_provider(d, model) is None:
         model = "auto"
-    if model == "auto" and not req.headers.get("x-hub-provider"):
+    if model == "auto" and not req.headers.get("x-hub-provider") and scope is None:
         pin = (d.get("harness_model") or "auto").strip()
         if pin and pin != "auto":
             _pp = find_model_provider(d, pin)
@@ -2063,11 +2184,16 @@ async def anth_messages(req: Request):
     if req.headers.get("x-hub-provider"):
         p = _pick_provider(d, req)
         scoped = [(p, m) for m in (chat_candidates(d, p) if model == "auto" else [model])]
+        if scope is not None:
+            allowed = pool_scope_set(d, scope)
+            scoped = [(p, m) for (p, m) in scoped if (p["id"], m) in allowed]
     elif model == "auto":
-        scoped = all_chat_candidates(d)
+        scoped = pool_scope_candidates(d, scope) if scope is not None else all_chat_candidates(d)
     else:
         p = find_model_provider(d, model)
         scoped = [(p, model)]
+        if scope is not None and (p["id"], model) not in pool_scope_set(d, scope, extra_cats={"图像生成"}):
+            return _anth_err(403, "模型 %s 不在号池「%s」范围内，已拦截。" % (model, scope.get("name")))
     if not scoped:
         log_call({"source": "proxy-anthropic", "provider": None,
                   "model_requested": model, "model_used": None,
@@ -2201,35 +2327,111 @@ DSH_SETTINGS = DSH_HOME / "settings.yaml"
 DSH_PID_FILE = BASE_DIR / "dsh.pid"
 DSH_LOG_FILE = BASE_DIR / "logs" / "dsh.log"
 
-_DSH_SETTINGS_TEXT = """\
-# 由 LLM Key Hub 自动生成：DeepSeek Harness 的所有模型调用走 Hub 总站（127.0.0.1:8787）
-agent-default-model:
-  provider: llm-hub
-  model: auto
-llm-pi-ai:
-  providers:
-    llm-hub:
-      api: openai-completions
-      baseURL: http://127.0.0.1:8787/v1
-      apiKeyEnv: HUB_API_KEY
-      compat:
-        supportsDeveloperRole: false
-        maxTokensField: max_tokens
-      models:
-        - id: auto
-"""
+_DSH_HUB_BASE = "http://127.0.0.1:8787/v1"
 
 
-def _dsh_ensure_settings():
-    """首次使用时写入指向 Hub 的 provider 配置；已存在则不覆盖（尊重手动修改）。"""
-    if DSH_SETTINGS.exists():
-        return True
+def _dsh_route_key(pl):
+    """号池在 dsh settings.yaml 里的 provider 键（小写连字符文法）。"""
+    base = re.sub(r"[^a-z0-9]+", "-", str(pl.get("id") or "pool").lower()).strip("-")
+    return "llm-hub-" + (base or "pool")
+
+
+def _dsh_env_name(pl):
+    """号池 key 注入 dsh 进程的环境变量名。"""
+    return "HUB_POOL_KEY_" + re.sub(r"[^A-Z0-9]+", "_", str(pl.get("id") or "POOL").upper()).strip("_")
+
+
+def _dsh_read_old_settings():
     try:
-        DSH_HOME.mkdir(parents=True, exist_ok=True)
-        DSH_SETTINGS.write_text(_DSH_SETTINGS_TEXT, encoding="utf-8")
-        return True
+        old = yaml.safe_load(DSH_SETTINGS.read_text(encoding="utf-8"))
+        return old if isinstance(old, dict) else {}
     except Exception:
-        return False
+        return {}
+
+
+def _dsh_render_settings(d):
+    """按号池分组重写 dsh settings.yaml：
+    顶部 llm-hub = 全部号池共用的 key/URL（dsh 下拉「Hub · 全部号池」组）；
+    其余每个号池一个分组（各自 key、各自 auto 轮询）。
+    保留用户在 dsh 侧的其它 provider / 默认模型选择 / 顶层键；
+    llm-hub* 前缀的 provider 由 Hub 管理，手动改动会在同步时被覆盖。"""
+    old = _dsh_read_old_settings()
+    lpa_old = old.get("llm-pi-ai")
+    provs_old = (lpa_old.get("providers") or {}) if isinstance(lpa_old, dict) else {}
+    adopted = []
+    hub_old = provs_old.get("llm-hub")
+    if isinstance(hub_old, dict):
+        for m in hub_old.get("models") or []:
+            mid = m.get("id") if isinstance(m, dict) else m
+            if mid and mid != "auto" and mid not in adopted:
+                adopted.append(mid)
+    compat = {"supportsDeveloperRole": False, "maxTokensField": "max_tokens"}
+    providers = {}
+    providers["llm-hub"] = {
+        "api": "openai-completions",
+        "baseURL": _DSH_HUB_BASE,
+        "apiKeyEnv": "HUB_API_KEY",
+        "displayName": "Hub · 全部号池",
+        "compat": compat,
+        "models": [{"id": "auto"}] + [{"id": m} for m in adopted],
+    }
+    used = {"llm-hub"}
+    for i, pl in enumerate(d.get("pools") or []):
+        rk = _dsh_route_key(pl)
+        while rk in used:
+            rk += "-%d" % i
+        used.add(rk)
+        seen_m, mlist = set(), []
+        for _p, m in pool_scope_candidates(d, pl, extra_cats={"图像生成"}):
+            if m in seen_m:
+                continue
+            seen_m.add(m)
+            mlist.append({"id": m})
+        providers[rk] = {
+            "api": "openai-completions",
+            "baseURL": _DSH_HUB_BASE,
+            "apiKeyEnv": _dsh_env_name(pl),
+            "displayName": "号池 · " + (pl.get("name") or pl.get("id") or ""),
+            "compat": compat,
+            "models": [{"id": "auto"}] + mlist,
+        }
+    for k, v in provs_old.items():
+        if not str(k).startswith("llm-hub"):
+            providers[k] = v
+    out = dict(old)
+    out["llm-pi-ai"] = {"providers": providers}
+    out.setdefault("agent-default-model", {"provider": "llm-hub", "model": "auto"})
+    header = ("# 由 LLM Key Hub 自动生成（号池分组版）。\n"
+              "# 顶部 llm-hub = 全部号池共用 key/URL；每个号池一个分组（各自 key、各自 auto 轮询）。\n"
+              "# llm-hub* 前缀的 provider 由 Hub 管理并在号池变更时被重写；其余键原样保留。\n")
+    DSH_HOME.mkdir(parents=True, exist_ok=True)
+    text = header + yaml.safe_dump(out, allow_unicode=True, sort_keys=False)
+    DSH_SETTINGS.write_text(text, encoding="utf-8")
+    return True
+
+
+def _dsh_settings_refresh(d):
+    """仅重写 settings.yaml（dsh 按请求重读，无需重启）；用于模型勾选等不影响 key 的变更。"""
+    try:
+        _dsh_render_settings(d)
+    except Exception as e:
+        print("[dsh-sync] settings refresh failed: %r" % e)
+
+
+def _dsh_sync_pools(d):
+    """号池/渠道结构变更后调用：重写 settings.yaml；dsh 在运行则重启注入新号池 key。"""
+    try:
+        _dsh_render_settings(d)
+    except Exception as e:
+        return {"ok": False, "message": "写入 %s 失败：%r" % (DSH_SETTINGS, e)}
+    if _dsh_http_up():
+        _dsh_stop()
+        time.sleep(0.5)
+        r = _dsh_start()
+        r.setdefault("ok", True)
+        r["restarted"] = True
+        return r
+    return {"ok": True, "restarted": False}
 
 
 def _dsh_http_up():
@@ -2285,8 +2487,12 @@ def _dsh_status():
 def _dsh_start():
     if _dsh_http_up():
         return {"ok": True, "started": False, "message": "已在运行"}
-    if not _dsh_ensure_settings():
-        return {"ok": False, "message": "写入 %s 失败" % DSH_SETTINGS}
+    d = load_data()
+    _ensure_pool_keys(d)
+    try:
+        _dsh_render_settings(d)
+    except Exception as e:
+        return {"ok": False, "message": "写入 %s 失败：%r" % (DSH_SETTINGS, e)}
     dsh = shutil.which("dsh")
     if not dsh:
         cand = r"F:\deepseek-harness\app\node_modules\.bin\dsh.CMD"
@@ -2295,8 +2501,11 @@ def _dsh_start():
     if not dsh:
         return {"ok": False, "message": "未找到 dsh 命令，请先在 F:\\deepseek-harness\\app 执行 npm install @deepseek-ai/dsh"}
     env = dict(os.environ)
-    env["HUB_API_KEY"] = get_hub_key(load_data())
+    env["HUB_API_KEY"] = get_hub_key(d)
     env["DSH_HOME"] = str(DSH_HOME).strip()
+    for pl in d.get("pools") or []:
+        if pl.get("key"):
+            env[_dsh_env_name(pl)] = pl["key"]
     # 直接以列表形式启动 node.exe 跑 dsh 的 bin.js,绕开 .CMD 与 cmd.exe 两层包装。
     # 实测:DETACHED + cmd.exe 的 `>>` 重定向链路里,cmd 内部命令(echo)能落盘,
     # 但 node 的 stdout 完全不落盘,dsh web 的 token URL 永远进不了 dsh.log,
@@ -2387,6 +2596,12 @@ def api_harness_start():
 @app.post("/api/harness/stop")
 def api_harness_stop():
     return _dsh_stop()
+
+
+@app.post("/api/harness/dsh-sync")
+def api_harness_dsh_sync():
+    """按号池分组重建 dsh settings.yaml（顶部全池 + 每号池一组）；dsh 在跑则重启注入 key。"""
+    return _dsh_sync_pools(load_data())
 
 
 # ---------------- Copilot 反代（copilot-api，端口 4141） ----------------

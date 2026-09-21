@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>LLM Key Hub · DeepSeek Harness</title>
-<link rel="stylesheet" href="/static/hub.css?v=6">
+<link rel="stylesheet" href="/static/hub.css?v=9">
 </head>
 <body class="page-harness">
 <aside class="sidebar">
@@ -29,7 +29,7 @@
     <iframe id="dshFrame" src="about:blank" title="DeepSeek Harness Web UI" style="display:none"></iframe>
     <div id="downPane" class="harness-down">
       <div class="big"><span id="stDot" class="dot bad"></span> DeepSeek Harness <span id="stChip" class="chip">检测中…</span></div>
-      <div class="sub">dsh web 服务未在运行。模型切换 = dsh 面板内「标准模式」下拉旁的模型卡片（dsh 启动后自动出现）：Auto = 号池自动轮询，指定模型 = 锁定单模型（候选 = 渠道管理号池中已勾选的模型）；出口 provider <code>llm-hub</code> → <code>127.0.0.1:8787/v1</code>。</div>
+      <div class="sub">dsh web 服务未在运行。模型切换走 dsh 内置模型列表：顶部「Hub · 全部号池」分组 = 全部号池共用 key（auto = 跨池大轮询）；每个号池一个同名分组（各自 key、auto 只在池内轮询）。分组由渠道管理页的号池面板自动同步到 dsh；出口 <code>127.0.0.1:8787/v1</code>。</div>
       <button id="btnStart" class="primary" onclick="startDsh()">启动 DeepSeek Harness</button>
     </div>
   </div>

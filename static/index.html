@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>LLM Key Hub · 渠道管理</title>
-<link rel="stylesheet" href="/static/hub.css?v=8">
+<link rel="stylesheet" href="/static/hub.css?v=9">
 </head>
 <body>
 <aside class="sidebar">
@@ -68,8 +68,14 @@
   <div id="overviewSec">
     <div class="tile-row" id="tiles"></div>
     <div class="sec-title" style="display:flex;align-items:center;gap:10px">
+      <span>号池分组（顶部为全部号池共用；每个号池自己的 key + auto 轮询，dsh 内同名分组自动同步）</span>
+      <button class="small" onclick="addPool()">+ 空白号池</button>
+      <button class="small" onclick="openPoolPicker(null)">+ 模型组合号池</button>
+      <button class="small" onclick="syncDsh()">同步到 dsh</button>
+    </div>
+    <div class="card pool-panel" id="poolPanel"></div>
+    <div class="sec-title" style="display:flex;align-items:center;gap:10px">
       <span>渠道面板（每种渠道一个面板，点击进入单独管理该渠道下的模型）</span>
-      <button class="small" onclick="addPool()">+ 新建号池</button>
       <span id="poolBar"></span>
     </div>
     <div class="panel-grid" id="panels"></div>
@@ -82,6 +88,7 @@
   <div id="detailSec" style="display:none"></div>
 </div>
 </div>
+<div id="mpModal" class="mpm-overlay" style="display:none" onclick="if(event.target===this)closePoolPicker()"></div>
 <div id="toast"></div>
 
 <script>
@@ -736,6 +743,107 @@ function renderPoolBar(){
   ).join(' ');
 }
 
+// ---------------- 号池分组面板（全池共用 + 每号池自己的 key / auto 轮询） ----------------
+function maskKey(k){ k = String(k||''); return k ? k.slice(0,7)+'…'+k.slice(-4) : '未生成'; }
+
+function renderPoolPanel(){
+  const el = $('#poolPanel');
+  if(!el) return;
+  const ps = STATE.providers || [];
+  const eu = effUrl(STATE.hub_base || 'http://127.0.0.1:8787/v1');
+  let h = '<div class="pp-head">全部号池共用 · dsh 分组「Hub · 全部号池」（auto = 跨全部号池大轮询）</div>';
+  h += '<div class="pp-row"><span class="pp-name">key</span><code class="pp-key">'+esc(maskKey(STATE.hub_key))+'</code>'
+     + '<button class="small" onclick="cp(\''+esc(STATE.hub_key||'')+'\')">复制</button>'
+     + '<span class="pp-name">URL</span><code>'+esc(eu)+'</code>'
+     + '<button class="small" onclick="cp(\''+esc(eu)+'\')">复制</button></div>';
+  for(const pl of (STATE.pools||[])){
+    if(!pl.id) continue;
+    const isMp = (pl.models||[]).length > 0;
+    const provs = ps.filter(p => p.pool_id === pl.id);
+    h += '<div class="pp-pool">';
+    h += '<div class="pp-row"><span class="pp-name">◆ '+esc(pl.name)+'</span>'
+       + '<span class="chip">'+(isMp ? '模型池 · '+(pl.models||[]).length+' 模型' : '渠道池 · '+provs.length+' 账号')+'</span>'
+       + '<code class="pp-key">'+esc(maskKey(pl.key))+'</code>'
+       + '<button class="small" onclick="cp(\''+esc(pl.key||'')+'\')">复制</button>'
+       + '<button class="small" onclick="resetPoolKey(\''+pl.id+'\')">重置key</button></div>';
+    if(isMp){
+      const names = (pl.models||[]).map(s => esc(String(s).split('::').pop())).join('、');
+      h += '<div class="pp-sub">模型：'+names+'</div>';
+    }else{
+      h += '<div class="pp-sub">渠道：'+(provs.map(p=>esc(p.name)).join('、')||'（空）')+' · auto 在池内轮询</div>';
+    }
+    h += '<div class="pp-ops">'
+       + '<a href="#" onclick="openPoolPicker(\''+pl.id+'\');return false">编辑模型</a>'
+       + '<a href="#" onclick="renamePool(\''+pl.id+'\',\''+esc(pl.name)+'\');return false">改名</a>'
+       + ((STATE.pools||[]).length>1 ? '<a href="#" onclick="delPool(\''+pl.id+'\',\''+esc(pl.name)+'\');return false">删除</a>' : '')
+       + '</div>';
+    h += '</div>';
+  }
+  el.innerHTML = h;
+}
+
+async function resetPoolKey(poolId){
+  if(!confirm('重置号池 key？旧 key 立即失效（dsh 侧分组会自动同步重建）。')) return;
+  try{
+    await api('/api/pools/'+poolId, 'PUT', {reset_key:true});
+    toast('号池 key 已重置');
+    await load();
+  }catch(e){ toast('重置失败：'+e.message, true); }
+}
+
+async function syncDsh(){
+  toast('正在按号池分组重建 dsh 配置…');
+  try{
+    const r = await api('/api/harness/dsh-sync','POST',{});
+    toast(r.restarted ? 'dsh 分组已重建，dsh 已重启' : 'dsh 分组已重建（dsh 未在运行，下次启动生效）');
+  }catch(e){ toast('同步失败：'+e.message, true); }
+}
+
+// ---------------- 模型组合号池：从全部号池模型勾选 ----------------
+let PICK = {poolId:null, sel:new Set()};
+
+function openPoolPicker(poolId){
+  const pl = poolId ? (STATE.pools||[]).find(x=>x.id===poolId) : null;
+  PICK = {poolId: poolId||null, sel: new Set(pl?(pl.models||[]):[])};
+  let h = '<div class="mpm-card">'
+       + '<div class="mpm-head">'+(pl ? '编辑号池「'+esc(pl.name)+'」的模型' : '从全部号池模型中勾选，组合为一个号池')+'</div>'
+       + '<div class="mpm-name">名称 <input id="mpmName" value="'+esc(pl?pl.name:'')+'" placeholder="号池 ' + (((STATE.pools||[]).length)+1) + '"></div>'
+       + '<div class="mpm-list">';
+  for(const p of (STATE.providers||[])){
+    const ms = p.models || [];
+    if(!ms.length) continue;
+    h += '<div class="mpm-prov">'+esc(p.name)+' <span class="chip">'+ms.length+'</span></div>';
+    const dis = new Set(p.disabled_models||[]);
+    for(const m of ms){
+      const val = p.id+'::'+m;
+      h += '<label class="mpm-item'+(dis.has(m)?' dim':'')+'"><input type="checkbox" value="'+esc(val)+'"'
+         + (PICK.sel.has(val)?' checked':'') + '> '+esc(m)+(dis.has(m)?'（渠道已停用）':'')+'</label>';
+    }
+  }
+  h += '</div><div class="mpm-foot"><button class="primary" onclick="savePoolModels()">保存</button>'
+     + '<button onclick="closePoolPicker()">取消</button><span id="mpmMsg" class="quota-line"></span></div></div>';
+  $('#mpModal').innerHTML = h;
+  $('#mpModal').style.display = 'flex';
+}
+
+function closePoolPicker(){ $('#mpModal').style.display = 'none'; }
+
+async function savePoolModels(){
+  const sel = [...document.querySelectorAll('#mpModal input[type=checkbox]:checked')].map(i=>i.value);
+  if(!sel.length){ $('#mpmMsg').textContent = '请至少勾选一个模型'; return; }
+  try{
+    if(PICK.poolId){
+      await api('/api/pools/'+PICK.poolId, 'PUT', {models: sel});
+    }else{
+      const name = $('#mpmName').value.trim();
+      if(!name){ $('#mpmMsg').textContent = '请填写号池名称'; return; }
+      await api('/api/pools', 'POST', {name, models: sel});
+    }
+    closePoolPicker();
+    await load();
+  }catch(e){ $('#mpmMsg').textContent = '保存失败：'+e.message; }
+}
+
 // ---------------- 详情页：单渠道管理 ----------------
 function renderDetail(){
   const p = (STATE.providers || []).find(x => x.id === VIEW.pid);
@@ -759,6 +867,7 @@ function render(){
     renderTiles();
     renderPanels();
     renderPoolBar();
+    renderPoolPanel();
   }
   // Hub 统一 key
   const hk = STATE.hub_key || '';
