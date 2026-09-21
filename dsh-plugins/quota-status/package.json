@@ -1,0 +1,25 @@
+{
+  "name": "@dsh-local/quota-status",
+  "version": "0.1.0",
+  "description": "llm-hub quota status ring for the dsh composer: a native-feeling circular indicator next to the model seat, backed by hub /api/state.",
+  "type": "module",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-primitives"
+      ],
+      "platform": "web"
+    }
+  }
+}
