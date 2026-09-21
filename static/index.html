@@ -645,7 +645,7 @@ function renderCfg(){
 }
 async function setCallMode(mode){
   try{
-    const r = await api('/api/call-config', 'POST', {mode: mode, public_host: ($('#cfgHost')||{}).value || ''});
+    const r = await api('/api/call-config', 'POST', {mode: mode, public_host: (STATE.call_config||{}).public_host || ''});
     if(r.ok) toast(mode==='public' ? '已切换为公网调用地址' : '已切换为本机（局域网）调用地址');
     else toast('切换失败：'+(r.error||''), true);
   }catch(e){ toast('切换失败：'+e.message, true); }
@@ -653,8 +653,20 @@ async function setCallMode(mode){
 }
 async function saveCallHost(){
   try{
-    const r = await api('/api/call-config', 'POST', {mode: (STATE.call_config||{}).mode || 'lan', public_host: $('#cfgHost').value});
-    if(r.ok) toast('公网地址已保存');
+    const v = (($('#cfgHost')||{}).value || '').trim();
+    const old = ((STATE.call_config||{}).public_host || '');
+    let clear = false;
+    if(v === old){ toast('公网地址未变化，无需保存'); return; }
+    if(!v && old){
+      // 二次确认防误触：清空已保存地址必须用户明确确认
+      if(!confirm('输入框为空。确定要清除已保存的公网地址「' + old + '」吗？\n点「取消」保留原地址。')){
+        $('#cfgHost').value = old;
+        return;
+      }
+      clear = true;
+    }
+    const r = await api('/api/call-config', 'POST', {mode: (STATE.call_config||{}).mode || 'lan', public_host: v, clear_public_host: clear});
+    if(r.ok) toast(clear ? '公网地址已清除' : '公网地址已保存');
     else toast('保存失败：'+(r.error||''), true);
   }catch(e){ toast('保存失败：'+e.message, true); }
   await load();

@@ -814,6 +814,22 @@ def refresh_models(pid: str):
         ids = [m for m in ids if str(m).startswith(WB_MODEL_PREFIXES)]
     elif "8317" in (p.get("base_url") or ""):
         ids = [m for m in ids if not str(m).startswith(WB_MODEL_PREFIXES)]
+    if p.get("type") == "bailian":
+        # 百炼（2026-09-21 用户拍板）：只保留「文本生成 / 多模态」且当前有可用免费额度的模型；
+        # 音频 / 向量 / 重排序 / 图像生成与 237 个无免费额度模型一律不进列表。
+        quota_ready = bool((d.get("quota") or {}).get("entries"))
+        filtered = []
+        for m in ids:
+            if model_category(m) not in ("文本生成", "多模态"):
+                continue
+            if quota_ready and quota_state(d, m)[0] != "free_ok":
+                continue
+            filtered.append(m)
+        if filtered:
+            ids = filtered
+        elif p.get("models"):
+            # 过滤后为空（如额度数据未同步/全过期）→ 保留旧列表，避免误清空
+            ids = p["models"]
     p["models"] = ids
     p["last_refresh"] = time.strftime("%Y-%m-%d %H:%M:%S")
     p["fetch_error"] = None
@@ -2329,6 +2345,46 @@ DSH_LOG_FILE = BASE_DIR / "logs" / "dsh.log"
 
 _DSH_HUB_BASE = "http://127.0.0.1:8787/v1"
 
+# 渠道分组号池（2026-09-21 用户拍板：dsh 模型面板 = Auto + 五大渠道区块，方便管理）。
+# 每区块一个模型粒度号池，池内模型随渠道勾选/额度自动同步；顺序即 dsh 面板顺序。
+CHANNEL_POOLS = [
+    ("pool_ch_deepseek", "DeepSeek 原生", "deepseek01"),
+    ("pool_ch_ag", "反重力 Antigravity", "eb00387935"),
+    ("pool_ch_copilot", "GitHub Copilot", "83c06be0ee"),
+    ("pool_ch_wb", "WorkBuddy", "wb001"),
+    ("pool_ch_bailian", "百炼", "bailian001"),
+]
+
+
+def _ensure_channel_pools(d):
+    """确保五个渠道分组号池存在，并把池内模型同步为渠道当前可对话模型（模型粒度号池）。"""
+    pools = d.setdefault("pools", [])
+    by_id = {pl.get("id"): pl for pl in pools}
+    provs = {p.get("id"): p for p in d.get("providers") or []}
+    changed = False
+    for pool_id, name, pid in CHANNEL_POOLS:
+        p = provs.get(pid)
+        if not p:
+            continue
+        pl = by_id.get(pool_id)
+        if not pl:
+            pl = {"id": pool_id, "name": name, "created_at": now_str(),
+                  "key": "", "channel_pid": pid, "models": []}
+            pools.append(pl)
+            by_id[pool_id] = pl
+            changed = True
+        pl["channel_pid"] = pid
+        want = [pid + "::" + m for m in chat_candidates(d, p)]
+        if pl.get("models") != want:
+            pl["models"] = want
+            changed = True
+    if changed:
+        for pl in pools:
+            if not pl.get("key"):
+                pl["key"] = _pool_new_key()
+        save_data(d)
+    return changed
+
 
 def _dsh_route_key(pl):
     """号池在 dsh settings.yaml 里的 provider 键（小写连字符文法）。"""
@@ -2355,34 +2411,33 @@ def _dsh_render_settings(d):
     其余每个号池一个分组（各自 key、各自 auto 轮询）。
     保留用户在 dsh 侧的其它 provider / 默认模型选择 / 顶层键；
     llm-hub* 前缀的 provider 由 Hub 管理，手动改动会在同步时被覆盖。"""
+    _ensure_channel_pools(d)
     old = _dsh_read_old_settings()
     lpa_old = old.get("llm-pi-ai")
     provs_old = (lpa_old.get("providers") or {}) if isinstance(lpa_old, dict) else {}
-    adopted = []
-    hub_old = provs_old.get("llm-hub")
-    if isinstance(hub_old, dict):
-        for m in hub_old.get("models") or []:
-            mid = m.get("id") if isinstance(m, dict) else m
-            if mid and mid != "auto" and mid not in adopted:
-                adopted.append(mid)
     compat = {"supportsDeveloperRole": False, "maxTokensField": "max_tokens"}
     providers = {}
+    # 顶部 Auto：全池 key，只有一个 auto（轮询 Hub 全部渠道）
     providers["llm-hub"] = {
         "api": "openai-completions",
         "baseURL": _DSH_HUB_BASE,
         "apiKeyEnv": "HUB_API_KEY",
-        "displayName": "Hub · 全部号池",
+        "displayName": "Auto · 全部渠道（轮询）",
         "compat": compat,
-        "models": [{"id": "auto"}] + [{"id": m} for m in adopted],
+        "models": [{"id": "auto"}],
     }
     used = {"llm-hub"}
-    for i, pl in enumerate(d.get("pools") or []):
+    # 五大渠道区块：各自 key、组内 auto + 详细模型列表；顺序按 CHANNEL_POOLS
+    order = [cp[0] for cp in CHANNEL_POOLS]
+    ch_pools = [pl for pl in (d.get("pools") or []) if pl.get("channel_pid")]
+    ch_pools.sort(key=lambda pl: order.index(pl["id"]) if pl.get("id") in order else 99)
+    for i, pl in enumerate(ch_pools):
         rk = _dsh_route_key(pl)
         while rk in used:
             rk += "-%d" % i
         used.add(rk)
         seen_m, mlist = set(), []
-        for _p, m in pool_scope_candidates(d, pl, extra_cats={"图像生成"}):
+        for _p, m in pool_scope_candidates(d, pl):
             if m in seen_m:
                 continue
             seen_m.add(m)
@@ -2391,7 +2446,7 @@ def _dsh_render_settings(d):
             "api": "openai-completions",
             "baseURL": _DSH_HUB_BASE,
             "apiKeyEnv": _dsh_env_name(pl),
-            "displayName": "号池 · " + (pl.get("name") or pl.get("id") or ""),
+            "displayName": pl.get("name") or pl.get("id") or "",
             "compat": compat,
             "models": [{"id": "auto"}] + mlist,
         }
@@ -2400,10 +2455,24 @@ def _dsh_render_settings(d):
             providers[k] = v
     out = dict(old)
     out["llm-pi-ai"] = {"providers": providers}
-    out.setdefault("agent-default-model", {"provider": "llm-hub", "model": "auto"})
-    header = ("# 由 LLM Key Hub 自动生成（号池分组版）。\n"
-              "# 顶部 llm-hub = 全部号池共用 key/URL；每个号池一个分组（各自 key、各自 auto 轮询）。\n"
-              "# llm-hub* 前缀的 provider 由 Hub 管理并在号池变更时被重写；其余键原样保留。\n")
+    # 默认模型：尽量保留用户选择；模型已不在原分组则改指到包含它的分组，都没有回退全池 auto
+    adm = old.get("agent-default-model") or {}
+    am, ap = adm.get("model"), adm.get("provider")
+    def _ids(pv):
+        return [m.get("id") if isinstance(m, dict) else m for m in (pv.get("models") or [])]
+    valid = ap in providers and am in _ids(providers[ap])
+    if not valid and am:
+        for rk, pv in providers.items():
+            if am in _ids(pv):
+                ap, valid = rk, True
+                break
+    if not valid:
+        ap, am = "llm-hub", "auto"
+    out["agent-default-model"] = {"provider": ap, "model": am}
+    header = ("# 由 LLM Key Hub 自动生成（Auto + 渠道区块版，2026-09-21）。\n"
+              "# 顶部 llm-hub = Auto · 全部渠道（全池 key，仅 auto）；\n"
+              "# 其下五个渠道区块各用渠道号池 key（组内 auto 轮询 + 详细模型列表）。\n"
+              "# llm-hub* 前缀的 provider 由 Hub 管理并在同步时被重写；其余键原样保留。\n")
     DSH_HOME.mkdir(parents=True, exist_ok=True)
     text = header + yaml.safe_dump(out, allow_unicode=True, sort_keys=False)
     DSH_SETTINGS.write_text(text, encoding="utf-8")
@@ -2797,7 +2866,13 @@ async def api_call_config(req: Request):
             raise HTTPException(400, "mode 只能是 lan / public")
         cc["mode"] = m
     if "public_host" in body:
-        cc["public_host"] = str(body.get("public_host") or "").strip().rstrip("/")
+        v = str(body.get("public_host") or "").strip().rstrip("/")
+        if not v and cc.get("public_host") and not body.get("clear_public_host"):
+            # 防误触（2026-09-21 用户拍板）：空值不清除已保存的公网地址，
+            # 需前端二次确认后带 clear_public_host=true 才会清空。
+            pass
+        else:
+            cc["public_host"] = v
     d["call_config"] = cc
     save_data(d)
     return {"ok": True, "call_config": cc, "lan_ip": _lan_ip()}
