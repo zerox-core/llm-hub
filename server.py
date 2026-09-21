@@ -15,6 +15,7 @@ import os
 import re
 import secrets
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -122,6 +123,7 @@ def load_data():
         d.setdefault("autostart_harness", True)     # 启动器联动：Hub 启动后自动拉起 dsh
         d.setdefault("autostart_copilot", True)     # 启动器联动：Hub 启动后自动拉起 copilot-api
         d.setdefault("copilot_quota", {})           # Copilot premium 配额（check-usage 同步）
+        d.setdefault("call_config", {"mode": "lan", "public_host": ""})  # 调用地址开关：lan=本机(局域网) / public=公网
         for p in d["providers"]:
             _migrate_provider(p)
         _migrate_pools(d)
@@ -688,6 +690,8 @@ def state():
         "autostart_harness": bool(d.get("autostart_harness", True)),
         "copilot_quota": d.get("copilot_quota") or {},
         "autostart_copilot": bool(d.get("autostart_copilot", True)),
+        "call_config": d.get("call_config") or {"mode": "lan", "public_host": ""},
+        "lan_ip": _lan_ip(),
         "server_time": time.strftime("%Y-%m-%d %H:%M:%S"),
         "wb_status": {"installed": (CLIPROXY_DIR / "plugins" / "workbuddy.dll").exists(),
                       "logged_in": wb_auth_exists(),
@@ -2497,6 +2501,93 @@ def copilot_quota_refresh():
     return out
 
 
+_lan_ip_cache = {"ip": None, "t": 0.0}
+
+
+def _lan_ip():
+    """探测本机局域网 IP：优先 ipconfig 枚举真实私网段（排除 TUN fake-IP / Tailscale CGNAT / APIPA），30s 缓存"""
+    import re as _re
+    import subprocess as _sp
+    import time as _time
+
+    def _priv(ip):
+        m = _re.match(r"^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$", ip)
+        if not m:
+            return False
+        a, b = int(m.group(1)), int(m.group(2))
+        if a in (0, 127, 169, 198, 224, 255):
+            return False
+        if a == 100 and 64 <= b <= 127:  # CGNAT（Tailscale 等）
+            return False
+        if a == 192 and b == 168:
+            return True
+        if a == 10:
+            return True
+        if a == 172 and 16 <= b <= 31:
+            return True
+        return False
+
+    now = _time.time()
+    if _lan_ip_cache["ip"] and now - _lan_ip_cache["t"] < 30:
+        return _lan_ip_cache["ip"]
+    ip = "127.0.0.1"
+    try:
+        out = _sp.run(["ipconfig"], capture_output=True, text=True, timeout=5).stdout or ""
+        for cand in _re.findall(r"IPv4[^\r\n]*?(\d{1,3}(?:\.\d{1,3}){3})", out):
+            if _priv(cand):
+                ip = cand
+                break
+    except Exception:
+        pass
+    if ip == "127.0.0.1":
+        s = None
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            cand = s.getsockname()[0]
+            if _priv(cand):
+                ip = cand
+        except Exception:
+            pass
+        finally:
+            try:
+                if s is not None:
+                    s.close()
+            except Exception:
+                pass
+    if ip == "127.0.0.1":
+        try:
+            for cand in {i[4][0] for i in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)}:
+                if _priv(cand):
+                    ip = cand
+                    break
+        except Exception:
+            pass
+    _lan_ip_cache["ip"] = ip
+    _lan_ip_cache["t"] = now
+    return ip
+
+
+@app.post("/api/call-config")
+async def api_call_config(req: Request):
+    """调用地址总开关：mode=lan（本机/局域网）/ public（公网），public_host 为公网地址"""
+    body = await req.json()
+    d = load_data()
+    cc = d.get("call_config") or {}
+    cc.setdefault("mode", "lan")
+    cc.setdefault("public_host", "")
+    if "mode" in body:
+        m = str(body.get("mode") or "")
+        if m not in ("lan", "public"):
+            raise HTTPException(400, "mode 只能是 lan / public")
+        cc["mode"] = m
+    if "public_host" in body:
+        cc["public_host"] = str(body.get("public_host") or "").strip().rstrip("/")
+    d["call_config"] = cc
+    save_data(d)
+    return {"ok": True, "call_config": cc, "lan_ip": _lan_ip()}
+
+
 def _autostart_copilot_worker():
     """Hub 启动后按配置自动拉起 copilot-api（GitHub Copilot 反代，端口 4141）。"""
     for _ in range(60):
@@ -2557,11 +2648,11 @@ if __name__ == "__main__":
         print("LLM Key Hub 已经在运行： http://127.0.0.1:8787")
         print("无需重复启动，直接在浏览器打开上面的地址即可。本窗口可以关闭。")
         sys.exit(0)
-    print("LLM Key Hub 已启动: http://127.0.0.1:8787  (仅监听本机回环)")
+    print("LLM Key Hub 已启动: http://127.0.0.1:8787  (已监听 0.0.0.0，局域网设备可用 http://%s:8787 访问)" % _lan_ip())
     threading.Thread(target=_autostart_harness_worker, daemon=True).start()
     threading.Thread(target=_autostart_copilot_worker, daemon=True).start()
     try:
-        uvicorn.run(app, host="127.0.0.1", port=8787, log_level="warning")
+        uvicorn.run(app, host="0.0.0.0", port=8787, log_level="warning")
     except OSError as e:
         print("启动失败：%r" % e)
         sys.exit(1)

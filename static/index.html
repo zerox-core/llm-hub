@@ -4,23 +4,24 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>LLM Key Hub · 渠道管理</title>
-<link rel="stylesheet" href="/static/hub.css?v=6">
+<link rel="stylesheet" href="/static/hub.css?v=7">
 </head>
 <body>
 <aside class="sidebar">
   <div class="side-brand side-brand-row">LLM Key Hub<button class="side-toggle" data-side-toggle title="收起侧栏">«</button><small>本地大模型钥匙管理</small></div>
   <nav class="side-nav">
     <a href="/harness"><span class="ico">◆</span>DeepSeek Harness</a>
-    <a href="/" class="on"><span class="ico">▦</span>渠道管理</a>
+    <a href="/" class="on" id="navOverview" onclick="backToOverview();return false"><span class="ico">▦</span>渠道总览</a>
+    <div id="sideProviders" class="side-prov"></div>
     <a href="/monitor"><span class="ico">≡</span>调用监控</a>
   </nav>
-  <div class="side-foot">仅监听本机回环<br>http://127.0.0.1:8787</div>
+  <div class="side-foot" id="sideFoot">本机 http://127.0.0.1:8787</div>
 </aside>
 <button class="side-expand" data-side-toggle title="展开侧栏">☰</button>
 <div class="main">
 <div class="wrap">
   <div class="topbar">
-    <div class="title">渠道管理<small>号池 · 账号 · 模型勾选（仅本机 127.0.0.1）</small></div>
+    <div class="title">渠道管理<small>渠道总览 · 单渠道管理 · 调用地址开关（本机/公网）</small></div>
     <div class="actions">
       <span id="quotaChip" class="chip">百炼额度：未同步</span>
       <span id="hubUrlChip" class="chip" style="cursor:pointer" title="Hub 统一入口 URL（OpenAI 兼容 /v1），点击复制" onclick="copyHubUrl()">URL：…</span>
@@ -66,17 +67,23 @@
     </div>
   </div>
 
-  <div class="sec-title" style="display:flex;align-items:center;gap:10px">
-    <span>号池（号池 → 账号 → 模型；勾选的模型才进入可调列表与轮询）</span>
-    <button class="small" onclick="addPool()">+ 新建号池</button>
-  </div>
-  <div id="providers"></div>
+  <div class="card cfg-panel" id="cfgPanel"></div>
 
-  <div class="sec-title">百炼免费额度明细（来自 bl usage free，分钟级口径以控制台为准）</div>
-  <div class="card">
-    <div id="quotaSummary" class="quota-line">尚未同步。点击右上角「同步百炼额度」。</div>
-    <details class="raw"><summary>查看原始返回（调试用）</summary><pre id="quotaRaw">（无）</pre></details>
+  <div id="overviewSec">
+    <div class="tile-row" id="tiles"></div>
+    <div class="sec-title" style="display:flex;align-items:center;gap:10px">
+      <span>渠道面板（每种渠道一个面板，点击进入单独管理该渠道下的模型）</span>
+      <button class="small" onclick="addPool()">+ 新建号池</button>
+      <span id="poolBar"></span>
+    </div>
+    <div class="panel-grid" id="panels"></div>
+    <div class="sec-title">百炼免费额度明细（来自 bl usage free，分钟级口径以控制台为准）</div>
+    <div class="card">
+      <div id="quotaSummary" class="quota-line">尚未同步。点击右上角「同步百炼额度」。</div>
+      <details class="raw"><summary>查看原始返回（调试用）</summary><pre id="quotaRaw">（无）</pre></details>
+    </div>
   </div>
+  <div id="detailSec" style="display:none"></div>
 </div>
 </div>
 <div id="toast"></div>
@@ -396,8 +403,8 @@ async function syncCopilotQuota(){
   await load();
 }
 
-function renderProvider(p){
-  const collapsed = isCollapsed(p.id);
+function renderProvider(p, forceOpen){
+  const collapsed = !forceOpen && isCollapsed(p.id);
   const isBailian = p.type === 'bailian';
   const isAg = isAgProvider(p);
   const isWb = isWbProvider(p);
@@ -412,7 +419,7 @@ function renderProvider(p){
     '<span class="chip blue">已勾选 '+enabledCount(p)+' / '+(p.models||[]).length+'</span>' +
     '<span class="p-active">当前模型：<b>'+esc(p.active_model||'未选择')+'</b>'+activeWarn+'</span>' +
     '<span class="grow"></span>' + poolSwitchSel(p) +
-    '<button class="small" onclick="toggleCollapse(\''+p.id+'\')">'+(collapsed?'展开':'收起')+'</button></div>';
+    (forceOpen ? '' : '<button class="small" onclick="toggleCollapse(\''+p.id+'\')">'+(collapsed?'展开':'收起')+'</button>') + '</div>';
   if(collapsed) return '<div class="card collapsed">'+head+'</div>';
 
   const models = orderedModels(p);
@@ -479,7 +486,7 @@ function renderProvider(p){
 
   return '<div class="card">' + head + wbHint +
     '<div class="p-meta">' +
-      '<span>URL <code>'+esc(p.base_url)+'</code> <button class="small" onclick="cp(\''+esc(p.base_url)+'\')">复制</button></span>' +
+      '<span>URL <code>'+esc(effUrl(p.base_url))+'</code> <button class="small" onclick="cp(\''+esc(effUrl(p.base_url))+'\')">复制</button></span>' +
       '<span>Key <code id="key-'+p.id+'">'+esc(maskKey(p.api_key))+'</code> ' +
         '<button class="small" onclick="cp(\''+esc(p.api_key)+'\')">复制</button>' +
         '<button class="maskbtn" onclick="toggleKey(\''+p.id+'\')">显/隐</button></span>' +
@@ -508,36 +515,224 @@ function renderProvider(p){
   '</div>';
 }
 
-function renderPool(pl){
+
+// ---------------- 视图切换（总览 / 单渠道管理） ----------------
+let VIEW = {name:'overview', pid:null};
+try{ const _v = JSON.parse(sessionStorage.getItem('hub_view')||'null'); if(_v && _v.name) VIEW = _v; }catch(e){}
+function saveView(){ try{ sessionStorage.setItem('hub_view', JSON.stringify(VIEW)); }catch(e){} }
+function openProvider(pid){ VIEW = {name:'detail', pid:pid}; saveView(); render(); window.scrollTo(0,0); }
+function backToOverview(){ VIEW = {name:'overview', pid:null}; saveView(); render(); }
+
+// ---------------- 调用地址开关（本机/局域网 ↔ 公网） ----------------
+// 只重写 127.0.0.1 / localhost 的主机名；远程 API 地址（如百炼）原样透传
+function effUrl(base){
+  try{
+    const u = new URL(base);
+    if(u.hostname !== '127.0.0.1' && u.hostname !== 'localhost') return base;
+    const cc = STATE.call_config || {mode:'lan', public_host:''};
+    let host = null;
+    if(cc.mode === 'public' && cc.public_host){
+      const ph = String(cc.public_host).trim().replace(/\/+$/,'');
+      if(ph.indexOf('://') >= 0){
+        const pu = new URL(ph);
+        return pu.protocol + '//' + pu.host + u.pathname + u.search;
+      }
+      host = ph;
+    }
+    if(!host && STATE.lan_ip && STATE.lan_ip !== '127.0.0.1') host = STATE.lan_ip;
+    if(!host) return base;
+    const port = u.port ? ':' + u.port : '';
+    return u.protocol + '//' + host + port + u.pathname + u.search;
+  }catch(e){ return base; }
+}
+
+// ---------------- 渠道种类识别 ----------------
+function provIcon(p){
+  if(isCopilotProvider(p)) return '⬡';
+  if(isWbProvider(p)) return '◈';
+  if(isAgProvider(p)) return '✦';
+  if(p.type === 'bailian') return '☁';
+  return '◇';
+}
+function provKindName(p){
+  if(isCopilotProvider(p)) return 'GitHub Copilot 反代';
+  if(isWbProvider(p)) return '腾讯 CodeBuddy 反代';
+  if(isAgProvider(p)) return '反重力反代';
+  if(p.type === 'bailian') return '阿里云百炼';
+  return 'OpenAI 兼容';
+}
+function provQuotaLine(p){
+  try{
+    if(isCopilotProvider(p)){
+      const cq = STATE.copilot_quota || {};
+      const prem = cq.premium || {used:0, total:0};
+      if(cq.synced_at && cq.login){
+        const remain = Math.max(0, (prem.total||0) - (prem.used||0));
+        return '<span class="chip">Premium 剩 '+remain+' / '+(prem.total||0)+' · '+esc(cq.resets||'')+' 重置</span>';
+      }
+      return '<span class="chip">Copilot 配额未同步</span>';
+    }
+    if(isWbProvider(p)){
+      const wq = STATE.wb_quota || {};
+      let remain = 0, total = 0, n = 0;
+      (wq.accounts||[]).forEach(a => { if(a.error) return; const c = a.credits || {}; remain += (c.total_remain||0); total += (c.total_size||0); n++; });
+      if(n) return '<span class="chip">'+n+' 账号 · 积分剩 '+fmtNum(remain)+' / '+fmtNum(total)+'</span>';
+      return '<span class="chip">CodeBuddy 积分未同步</span>';
+    }
+    if(isAgProvider(p)){
+      const g1 = agGroupInfo('gemini'), g2 = agGroupInfo('claude');
+      const one = g => g.state==='ok' ? '余 '+fmtNum(g.rem5!==null?g.rem5:g.remw) : (g.state==='cooldown'?'冷却中':(g.state==='empty'?'已用尽':'未同步'));
+      return '<span class="chip">AG gemini '+one(g1)+' · claude '+one(g2)+'</span>';
+    }
+    if(p.type === 'bailian'){
+      const q = STATE.quota || {};
+      const ks = Object.keys(q.entries || {});
+      if(q.synced_at){
+        let free = 0;
+        ks.forEach(k => { if(((q.entries||{})[k]||{}).remaining > 0) free++; });
+        return '<span class="chip">有免费额度 '+free+' / '+ks.length+' 模型</span>';
+      }
+      return '<span class="chip">百炼额度未同步</span>';
+    }
+  }catch(e){}
+  return '';
+}
+
+// ---------------- 侧边栏动态渠道导航 ----------------
+function renderSide(){
+  const sp = $('#sideProviders');
+  if(sp){
+    const ps = STATE.providers || [];
+    sp.innerHTML = ps.map(p =>
+      '<a href="#" class="'+(VIEW.name==='detail' && VIEW.pid===p.id ? 'on':'')+'" onclick="openProvider(\''+p.id+'\');return false"><span class="ico">'+provIcon(p)+'</span>'+esc(p.name)+'</a>').join('');
+  }
+  const no = $('#navOverview');
+  if(no) no.className = VIEW.name==='overview' ? 'on' : '';
+  const sf = $('#sideFoot');
+  if(sf){
+    let t = '本机 http://127.0.0.1:8787';
+    if(STATE.lan_ip && STATE.lan_ip !== '127.0.0.1') t += '<br>局域网 http://'+esc(STATE.lan_ip)+':8787';
+    sf.innerHTML = t;
+  }
+}
+
+// ---------------- 顶部调用配置面板 ----------------
+function renderCfg(){
+  const el = $('#cfgPanel');
+  if(!el) return;
+  const cc = STATE.call_config || {mode:'lan', public_host:''};
+  const hub = effUrl(STATE.hub_base || 'http://127.0.0.1:8787/v1');
+  let urls = '<div class="cfg-url"><span class="nm">Hub 统一入口（自动轮询全部渠道）</span><code>'+esc(hub)+'</code><button class="small" onclick="cp(\''+esc(hub)+'\')">复制</button></div>';
+  (STATE.providers || []).forEach(p => {
+    const eu = effUrl(p.base_url);
+    urls += '<div class="cfg-url"><span class="nm">'+esc(p.name)+'</span><code>'+esc(eu)+'</code><button class="small" onclick="cp(\''+esc(eu)+'\')">复制</button></div>';
+  });
+  el.innerHTML =
+    '<div class="cfg-head"><b>调用配置</b>' +
+      '<div class="seg">' +
+        '<button class="'+(cc.mode!=='public'?'on':'')+'" onclick="setCallMode(\'lan\')">本机（局域网）</button>' +
+        '<button class="'+(cc.mode==='public'?'on':'')+'" onclick="setCallMode(\'public\')">公网</button>' +
+      '</div>' +
+      '<span class="cfg-host">公网地址 <input id="cfgHost" placeholder="如 llm.example.com 或 1.2.3.4（可带 https://）" value="'+esc(cc.public_host||'')+'"><button class="small primary" onclick="saveCallHost()">保存地址</button></span>' +
+    '</div>' +
+    '<div class="cfg-urls">'+urls+'</div>' +
+    '<div class="quota-line"><span class="q-num">' + (cc.mode==='public'
+      ? '公网模式：本机地址已切换为你配置的公网地址（未配置时回退局域网 IP）；远程 API 地址不受影响。'
+      : '本机模式：本机地址显示为局域网 IP，同网段设备可直接调用；远程 API 地址不受影响。') + '</span></div>';
+}
+async function setCallMode(mode){
+  try{
+    const r = await api('/api/call-config', 'POST', {mode: mode, public_host: ($('#cfgHost')||{}).value || ''});
+    if(r.ok) toast(mode==='public' ? '已切换为公网调用地址' : '已切换为本机（局域网）调用地址');
+    else toast('切换失败：'+(r.error||''), true);
+  }catch(e){ toast('切换失败：'+e.message, true); }
+  await load();
+}
+async function saveCallHost(){
+  try{
+    const r = await api('/api/call-config', 'POST', {mode: (STATE.call_config||{}).mode || 'lan', public_host: $('#cfgHost').value});
+    if(r.ok) toast('公网地址已保存');
+    else toast('保存失败：'+(r.error||''), true);
+  }catch(e){ toast('保存失败：'+e.message, true); }
+  await load();
+}
+
+// ---------------- 总览：统计磁贴行 ----------------
+function renderTiles(){
+  const t = $('#tiles');
+  if(!t) return;
   const ps = STATE.providers || [];
-  const provs = (pl.providers || []).map(pid => ps.find(x => x.id === pid)).filter(Boolean);
-  const multi = (STATE.pools || []).length > 1;
-  const head = '<div class="pool-head"><span class="pool-name">'+esc(pl.name)+'</span>' +
-    '<span class="chip">'+provs.length+' 个账号</span>' +
-    '<span class="grow"></span>' +
-    '<button class="small" onclick="renamePool(\''+esc(pl.id)+'\',\''+esc(pl.name)+'\')">重命名</button>' +
-    (multi ? '<button class="small danger" onclick="delPool(\''+esc(pl.id)+'\',\''+esc(pl.name)+'\')">删除号池</button>' : '') +
-    '</div>';
-  const body = provs.length ? provs.map(renderProvider).join('')
-    : '<div class="card empty">本号池还没有账号，点右上角「+ 添加渠道」。</div>';
-  return '<div class="pool-block">' + head + body + '</div>';
+  let h = '<div class="tile" onclick="backToOverview()"><div class="t-ico">▦</div><div><div class="t-name">渠道总数</div><div class="t-num">'+ps.length+'<span class="t-sub"> 个渠道</span></div></div></div>';
+  ps.forEach(p => {
+    h += '<div class="tile" onclick="openProvider(\''+p.id+'\')"><div class="t-ico">'+provIcon(p)+'</div><div><div class="t-name">'+esc(p.name)+'</div><div class="t-num">'+enabledCount(p)+'<span class="t-sub"> / '+(p.models||[]).length+' 模型</span></div></div></div>';
+  });
+  t.innerHTML = h;
+}
+
+// ---------------- 总览：渠道面板网格 ----------------
+function renderPanels(){
+  const g = $('#panels');
+  if(!g) return;
+  const ps = STATE.providers || [];
+  if(!ps.length){ g.innerHTML = '<div class="card" style="padding:22px;color:var(--sub)">还没有渠道，点右上角「+ 添加渠道」创建第一个。</div>'; return; }
+  const wbst = STATE.wb_status || {};
+  g.innerHTML = ps.map(p => {
+    const eu = effUrl(p.base_url);
+    return '<div class="pv">' +
+      '<div class="pv-head"><span class="pv-ico">'+provIcon(p)+'</span><span class="pv-name">'+esc(p.name)+'</span><span class="chip">'+provKindName(p)+'</span>' +
+      (isWbProvider(p) ? (wbst.logged_in ? '<span class="chip ok">WB 已登录</span>' : '<span class="chip bad">WB 未登录</span>') : '') +
+      (p.allow_paid ? '<span class="chip warn">允许付费</span>' : '') +
+      '</div>' +
+      '<div class="pv-line">当前模型 <b>'+esc(p.active_model||'未选择')+'</b></div>' +
+      '<div class="pv-line">已勾选 <b>'+enabledCount(p)+' / '+(p.models||[]).length+'</b>'+provQuotaLine(p)+'</div>' +
+      '<div class="pv-line">URL <code>'+esc(eu)+'</code><button class="small" onclick="cp(\''+esc(eu)+'\')">复制</button></div>' +
+      '<div class="pv-foot"><button class="pv-go" onclick="openProvider(\''+p.id+'\')">进入管理 ›</button></div>' +
+      '</div>';
+  }).join('');
+}
+
+// ---------------- 总览：号池条 ----------------
+function renderPoolBar(){
+  const bar = $('#poolBar');
+  if(!bar) return;
+  const pools = STATE.pools || [];
+  if(!pools.length){ bar.innerHTML = ''; return; }
+  const ps = STATE.providers || [];
+  bar.innerHTML = pools.map(pl =>
+    '<span class="chip">'+esc(pl.name)+' · '+ps.filter(p => p.pool_id===pl.id).length+' 账号</span>' +
+    '<a href="#" onclick="renamePool(\''+pl.id+'\',\''+esc(pl.name)+'\');return false">改名</a>' +
+    (pools.length>1 ? '<a href="#" onclick="delPool(\''+pl.id+'\',\''+esc(pl.name)+'\');return false">删除</a>' : '')
+  ).join(' ');
+}
+
+// ---------------- 详情页：单渠道管理 ----------------
+function renderDetail(){
+  const p = (STATE.providers || []).find(x => x.id === VIEW.pid);
+  if(!p){ backToOverview(); return; }
+  $('#detailSec').innerHTML =
+    '<div class="back-row"><button onclick="backToOverview()">‹ 返回总览</button>' +
+    '<span style="font-size:17px;font-weight:700">'+provIcon(p)+' '+esc(p.name)+'</span>' +
+    '<span class="q-num">单独管理该渠道下的模型（勾选 / 排序 / 测试 / 设为当前）</span></div>' +
+    renderProvider(p, true);
 }
 
 function render(){
-  const box = $('#providers');
-  const ps = STATE.providers || [];
-  const pools = STATE.pools || [];
-  if(!ps.length){
-    box.innerHTML = '<div class="card empty">还没有渠道。点右上角「+ 添加渠道」，填入 Base URL 和 Key 即可自动拉取模型列表。</div>';
-  } else if(pools.length){
-    box.innerHTML = pools.map(renderPool).join('');
+  renderSide();
+  renderCfg();
+  const isDetail = VIEW.name === 'detail' && (STATE.providers||[]).some(x => x.id === VIEW.pid);
+  $('#overviewSec').style.display = isDetail ? 'none' : '';
+  $('#detailSec').style.display = isDetail ? '' : 'none';
+  if(isDetail){
+    renderDetail();
   } else {
-    box.innerHTML = ps.map(renderProvider).join('');
+    renderTiles();
+    renderPanels();
+    renderPoolBar();
   }
   // Hub 统一 key
   const hk = STATE.hub_key || '';
   $('#hubKeyChip').textContent = 'Hub Key：' + (hk ? hk.slice(0,9) + '…' + hk.slice(-3) : '未生成');
-  $('#hubUrlChip').textContent = 'URL：' + (STATE.hub_base || '127.0.0.1:8787/v1');
+  $('#hubUrlChip').textContent = 'URL：' + effUrl(STATE.hub_base || 'http://127.0.0.1:8787/v1');
   // 额度区
   const q = STATE.quota || {};
   const entries = q.entries || {};
@@ -589,7 +784,7 @@ function copyJoin(pid, model){
   const p = STATE.providers.find(x=>x.id===pid);
   if(!p) return;
   const m = model || p.active_model || '';
-  const text = 'BASE_URL=' + p.base_url + '\nAPI_KEY=' + p.api_key + '\nMODEL=' + m;
+  const text = 'BASE_URL=' + effUrl(p.base_url) + '\nAPI_KEY=' + p.api_key + '\nMODEL=' + m;
   cp(text);
 }
 
@@ -600,12 +795,12 @@ function copyHubKey(){
 }
 
 function copyHubUrl(){
-  cp(STATE.hub_base || 'http://127.0.0.1:8787/v1');
+  cp(effUrl(STATE.hub_base || 'http://127.0.0.1:8787/v1'));
   toast('已复制统一入口 URL（OpenAI 兼容 /v1）');
 }
 
 function copyClaudeCode(){
-  const cfg = 'ANTHROPIC_BASE_URL=http://127.0.0.1:8787' +
+  const cfg = 'ANTHROPIC_BASE_URL=' + effUrl('http://127.0.0.1:8787').replace(/\/$/,'') +
     '\nANTHROPIC_AUTH_TOKEN=' + (STATE.hub_key || '(见顶栏 Hub Key)') +
     '\n# Claude Code 走 /v1/messages 适配层；model 名不在渠道里时 Hub 自动落到 auto 跨渠道轮动';
   cp(cfg);
@@ -614,7 +809,7 @@ function copyClaudeCode(){
 
 function copyHub(pid){
   const p = STATE.providers.find(x=>x.id===pid);
-  const text = 'BASE_URL=' + (STATE.hub_base || 'http://127.0.0.1:8787/v1') +
+  const text = 'BASE_URL=' + effUrl(STATE.hub_base || 'http://127.0.0.1:8787/v1') +
     '\nAPI_KEY=' + (STATE.hub_key || '(见顶栏 Hub Key)') +
     '\nMODEL=auto' +
     (p ? '\n# 请求头可加 X-Hub-Provider: ' + p.id + ' 指定渠道「' + p.name + '」（缺省为跨渠道大轮动）' : '');
