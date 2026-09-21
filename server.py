@@ -120,6 +120,8 @@ def load_data():
         d.setdefault("hub_key", "")
         d.setdefault("harness_model", "auto")       # Harness 模型选择：auto=轮询 / 具体模型=锁定
         d.setdefault("autostart_harness", True)     # 启动器联动：Hub 启动后自动拉起 dsh
+        d.setdefault("autostart_copilot", True)     # 启动器联动：Hub 启动后自动拉起 copilot-api
+        d.setdefault("copilot_quota", {})           # Copilot premium 配额（check-usage 同步）
         for p in d["providers"]:
             _migrate_provider(p)
         _migrate_pools(d)
@@ -684,6 +686,8 @@ def state():
         "pools": _pool_view(d),
         "harness_model": d.get("harness_model") or "auto",
         "autostart_harness": bool(d.get("autostart_harness", True)),
+        "copilot_quota": d.get("copilot_quota") or {},
+        "autostart_copilot": bool(d.get("autostart_copilot", True)),
         "server_time": time.strftime("%Y-%m-%d %H:%M:%S"),
         "wb_status": {"installed": (CLIPROXY_DIR / "plugins" / "workbuddy.dll").exists(),
                       "logged_in": wb_auth_exists(),
@@ -2381,6 +2385,143 @@ def api_harness_stop():
     return _dsh_stop()
 
 
+# ---------------- Copilot 反代（copilot-api，端口 4141） ----------------
+
+COPILOT_DIR = BASE_DIR / "copilot_api"
+COPILOT_MAIN = COPILOT_DIR / "node_modules" / "copilot-api" / "dist" / "main.js"
+COPILOT_PORT = 4141
+COPILOT_LOG_FILE = BASE_DIR / "logs" / "copilot.log"
+
+
+def _copilot_http_up():
+    try:
+        r = httpx.get("http://127.0.0.1:%d/v1/models" % COPILOT_PORT,
+                      timeout=3.0, trust_env=False)
+        return r.status_code == 200
+    except Exception:
+        return False
+
+
+def _copilot_start():
+    """拉起 copilot-api server（GitHub Copilot 反代，OpenAI/Anthropic 兼容出口）。"""
+    if _copilot_http_up():
+        return {"ok": True, "started": False, "message": "已在运行"}
+    if not COPILOT_MAIN.exists():
+        return {"ok": False, "message": "未找到 copilot-api（F:\\llm_hub\\copilot_api），先执行 npm install copilot-api"}
+    node_exe = shutil.which("node")
+    if not node_exe:
+        cand = r"C:\Program Files\nodejs\node.exe"
+        if os.path.exists(cand):
+            node_exe = cand
+    if not node_exe:
+        return {"ok": False, "message": "未找到 node.exe"}
+    try:
+        COPILOT_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        log_fh = open(COPILOT_LOG_FILE, "ab")
+        try:
+            subprocess.Popen(
+                [node_exe, str(COPILOT_MAIN), "start"],
+                cwd=str(COPILOT_DIR),
+                stdout=log_fh, stderr=subprocess.STDOUT,
+                creationflags=0x00000008 | 0x00000200)
+        finally:
+            log_fh.close()
+    except Exception as e:
+        return {"ok": False, "message": "启动失败：%r" % e}
+    for _ in range(60):
+        if _copilot_http_up():
+            return {"ok": True, "started": True, "message": "copilot-api 已启动（端口 %d）" % COPILOT_PORT}
+        time.sleep(0.5)
+    return {"ok": False, "message": "copilot-api 已拉起但端口 %d 在 30 秒内未就绪，见 logs/copilot.log" % COPILOT_PORT}
+
+
+@app.get("/api/copilot/status")
+def copilot_status():
+    """Copilot 反代状态：是否安装 / 是否在跑 / 最近一次配额快照"""
+    d = load_data()
+    return {"installed": COPILOT_MAIN.exists(),
+            "up": _copilot_http_up(),
+            "quota": d.get("copilot_quota") or {}}
+
+
+@app.post("/api/copilot/start")
+def copilot_start():
+    return _copilot_start()
+
+
+@app.post("/api/copilot/quota/refresh")
+def copilot_quota_refresh():
+    """同步 Copilot 配额：跑 copilot-api check-usage（只读接口，不耗 premium 配额）。"""
+    d = load_data()
+    out = {"ok": False}
+    if not COPILOT_MAIN.exists():
+        out["error"] = "未安装 copilot-api（F:\\llm_hub\\copilot_api）"
+        return out
+    node_exe = shutil.which("node")
+    if not node_exe:
+        cand = r"C:\Program Files\nodejs\node.exe"
+        if os.path.exists(cand):
+            node_exe = cand
+    if not node_exe:
+        out["error"] = "未找到 node.exe"
+        return out
+    try:
+        r = subprocess.run(
+            [node_exe, str(COPILOT_MAIN), "check-usage"],
+            capture_output=True, timeout=90, cwd=str(COPILOT_DIR))
+        clean = re.sub(r"\x1b\[[0-9;]*m", "", r.stdout.decode("utf-8", "replace"))
+        info = {}
+        m = re.search(r"Logged in as\s+(\S+)", clean)
+        info["login"] = m.group(1) if m else ""
+        m = re.search(r"plan:\s*([A-Za-z_-]+)\)", clean)
+        info["plan"] = m.group(1) if m else ""
+        m = re.search(r"Quota resets:\s*([0-9-]+)", clean)
+        info["resets"] = m.group(1) if m else ""
+        for key in ("Premium", "Chat", "Completions"):
+            m = re.search(key + r":\s*(\d+)/(\d+)\s*used", clean)
+            if m:
+                info[key.lower()] = {"used": int(m.group(1)), "total": int(m.group(2))}
+        if not info["login"]:
+            lines = [l.strip() for l in clean.strip().splitlines() if l.strip()]
+            out["error"] = "未解析到登录信息" + (("：" + lines[-1][:150]) if lines else "（check-usage 无输出）")
+            return out
+        out["ok"] = True
+        out["quota"] = info
+        cq = d.setdefault("copilot_quota", {})
+        cq.update(info)
+        cq["synced_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        save_data(d)
+        out["synced_at"] = cq["synced_at"]
+    except Exception as e:
+        out["error"] = str(e)[:200]
+    return out
+
+
+def _autostart_copilot_worker():
+    """Hub 启动后按配置自动拉起 copilot-api（GitHub Copilot 反代，端口 4141）。"""
+    for _ in range(60):
+        try:
+            r = httpx.get("http://127.0.0.1:8787/api/state", timeout=1.5)
+            if r.status_code == 200:
+                break
+        except Exception:
+            pass
+        time.sleep(0.5)
+    else:
+        return
+    try:
+        d = load_data()
+        if not d.get("autostart_copilot", True):
+            return
+        if not COPILOT_MAIN.exists():
+            return
+        time.sleep(0.5)
+        r = _copilot_start()
+        print("[autostart] copilot-api: %s" % (r.get("message") or r))
+    except Exception as e:
+        print("[autostart] copilot-api failed: %r" % e)
+
+
 def _autostart_harness_worker():
     """Hub 启动后按配置自动拉起 dsh（DeepSeek Harness），与渠道管理联动。"""
     for _ in range(60):
@@ -2418,6 +2559,7 @@ if __name__ == "__main__":
         sys.exit(0)
     print("LLM Key Hub 已启动: http://127.0.0.1:8787  (仅监听本机回环)")
     threading.Thread(target=_autostart_harness_worker, daemon=True).start()
+    threading.Thread(target=_autostart_copilot_worker, daemon=True).start()
     try:
         uvicorn.run(app, host="127.0.0.1", port=8787, log_level="warning")
     except OSError as e:

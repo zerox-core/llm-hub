@@ -156,6 +156,7 @@ function enabledCount(p){
 // ---- 反重力（Antigravity）组额度：组内模型共享 5 小时 + 每周额度 ----
 function isAgProvider(p){ return p && p.type === 'openai' && (p.base_url||'').includes(':8317') && p.kind !== 'wb'; }
 function isWbProvider(p){ return p && p.kind === 'wb'; }
+function isCopilotProvider(p){ return p && p.type === 'openai' && (p.base_url||'').includes(':4141'); }
 function agModelGroup(m){ return (m||'').toLowerCase().startsWith('gemini') ? 'gemini' : 'third'; }
 function agGroupTitle(key){ return key === 'gemini' ? 'Gemini 组' : 'Claude/GPT 组'; }
 
@@ -193,6 +194,14 @@ function fmtReset(iso){
 }
 
 function quotaCell(m, isBailian, p){
+  if(p && isCopilotProvider(p)){
+    const cq = STATE.copilot_quota || {};
+    const prem = cq.premium;
+    if(!cq.synced_at || !prem) return '<span class="q-num">配额未同步</span>';
+    const remain = Math.max(0, (prem.total||0) - (prem.used||0));
+    return '<span class="chip '+(remain<20?'warn':'ok')+'">Premium '+remain+'/'+(prem.total||0)+'</span>' +
+      ' <span class="q-num">月配额 · '+esc(cq.resets||'')+' 重置</span>';
+  }
   if(p && isWbProvider(p)){
     const wq = STATE.wb_quota || {};
     const rates = wq.rates || {};
@@ -351,18 +360,55 @@ function poolSwitchSel(p){
   return '<select class="poolsel" title="移至号池" onchange="moveToPool(\''+p.id+'\', this.value)">'+opts+'</select>';
 }
 
+function renderCopilotQuota(p){
+  const cq = STATE.copilot_quota || {};
+  let inner = '';
+  if(!cq.synced_at || !cq.login){
+    inner = '<div class="quota-line">尚未同步 Copilot 配额：点「同步配额」跑一次 check-usage（只读接口，不耗 premium 配额）。</div>';
+  } else {
+    const prem = cq.premium || {used:0, total:0};
+    const remain = Math.max(0, (prem.total||0) - (prem.used||0));
+    const total = prem.total || 0;
+    const pct = total ? Math.max(0, Math.min(100, remain/total*100)) : null;
+    const cls = pct===null?'':(pct<10?'bad':(pct<30?'warn':''));
+    const bar = pct===null?'':'<span class="quota-bar"><i class="'+cls+'" style="width:'+pct.toFixed(1)+'%"></i></span>';
+    inner += '<div class="quota-line"><b>'+esc(cq.login)+'（'+esc(cq.plan||'')+'）</b>' +
+      '<span class="q-num">'+esc(cq.synced_at)+' 同步</span></div>';
+    inner += '<div class="quota-line"><span class="ag-wname">Premium 月配额</span>' + bar +
+      '<span class="q-num">剩 '+remain+' / '+total+' · '+esc(cq.resets||'')+' 重置</span></div>';
+    const chat = cq.chat, comp = cq.completions;
+    if(chat && (chat.total||0) > 0)
+      inner += '<div class="quota-line"><span class="ag-wname">Chat 配额</span><span class="q-num">剩 '+Math.max(0,(chat.total||0)-(chat.used||0))+' / '+chat.total+'</span></div>';
+    if(comp && (comp.total||0) > 0)
+      inner += '<div class="quota-line"><span class="ag-wname">Completions 配额</span><span class="q-num">剩 '+Math.max(0,(comp.total||0)-(comp.used||0))+' / '+comp.total+'</span></div>';
+  }
+  const hint = '<div class="quota-line"><span class="q-num">premium 模型（claude / gpt-5 / gpt-6 等）按次扣月配额；gpt-4.1 / gpt-4o 等基础模型不占配额。配额由 GitHub 官方侧核算，重置时间以官方为准。</span></div>';
+  return '<div class="ag-quota"><div class="quota-line"><b>Copilot 配额</b></div>' + inner + hint + '</div>';
+}
+
+async function syncCopilotQuota(){
+  toast('正在查询 Copilot 配额…');
+  try{
+    const r = await api('/api/copilot/quota/refresh', 'POST', {});
+    if(r.ok) toast('已同步 Copilot 配额');
+    else toast('同步失败：'+(r.error||''), true);
+  }catch(e){ toast('同步失败：' + e.message, true); }
+  await load();
+}
+
 function renderProvider(p){
   const collapsed = isCollapsed(p.id);
   const isBailian = p.type === 'bailian';
   const isAg = isAgProvider(p);
   const isWb = isWbProvider(p);
+  const isCopilot = isCopilotProvider(p);
   const wbst = STATE.wb_status || {};
   const activeNoFree = isBailian && p.active_model && !p.allow_paid && qState(p.active_model) !== 'free_ok';
   const activeWarn = activeNoFree ? ' <span class="chip bad">无免费额度</span>' : '';
   const paidChip = p.allow_paid ? ' <span class="chip warn">允许付费</span>' : '';
   const wbChip = isWb ? ' <span class="chip '+(wbst.logged_in?'ok':'bad')+'">'+(wbst.logged_in?'已登录':'未登录')+'</span>' : '';
   let head = '<div class="p-head"><span class="p-name">'+esc(p.name)+'</span>' +
-    '<span class="chip">'+(isWb?'腾讯 CodeBuddy 反代':(isBailian?'阿里云百炼':'OpenAI 兼容'))+'</span>' + wbChip + paidChip +
+    '<span class="chip">'+(isWb?'腾讯 CodeBuddy 反代':(isCopilot?'GitHub Copilot 反代':(isBailian?'阿里云百炼':'OpenAI 兼容')))+'</span>' + wbChip + paidChip +
     '<span class="chip blue">已勾选 '+enabledCount(p)+' / '+(p.models||[]).length+'</span>' +
     '<span class="p-active">当前模型：<b>'+esc(p.active_model||'未选择')+'</b>'+activeWarn+'</span>' +
     '<span class="grow"></span>' + poolSwitchSel(p) +
@@ -443,6 +489,7 @@ function renderProvider(p){
       '<button class="small" onclick="refreshModels(\''+p.id+'\')">刷新模型列表</button>' +
       (isAg ? '<button class="small" title="同步反重力 5 小时 / 每周额度（不消耗对话额度）" onclick="syncAgQuota()">同步额度</button>' : '') +
       (isWb ? '<button class="small" title="同步 CodeBuddy 积分与每模型使用倍率（不消耗积分）" onclick="syncWbQuota()">同步积分</button>' : '') +
+      (isCopilot ? '<button class="small" title="同步 Copilot premium 月配额（只读 check-usage，不耗配额）" onclick="syncCopilotQuota()">同步配额</button>' : '') +
       '<button class="small" title="勾选本渠道全部模型（进入可调列表）" onclick="bulkEnable(\''+p.id+'\', true)">全选模型</button>' +
       '<button class="small" title="取消勾选本渠道全部模型（退出可调列表与轮询）" onclick="bulkEnable(\''+p.id+'\', false)">全不选</button>' +
       '<button class="small" onclick="testModel(\''+p.id+'\',\''+esc(p.active_model||'')+'\')">测试当前模型</button>' +
@@ -452,7 +499,7 @@ function renderProvider(p){
       '<button class="small danger" onclick="delProvider(\''+p.id+'\',\''+esc(p.name)+'\')">删除渠道</button>' +
       paidBox + freeOnlyBox + hiddenHint +
     '</div>' +
-    (isAg ? renderAgQuota(p) : (isWb ? renderWbQuota(p) : '')) +
+    (isAg ? renderAgQuota(p) : (isWb ? renderWbQuota(p) : (isCopilot ? renderCopilotQuota(p) : ''))) +
     (viewModels.length ? '<div class="order-hint">勾选 = 模型进入可调列表（auto 轮询与 Harness 单选都只用已勾选模型）；轮询按下列顺序进行（↑↓ 调整）。</div>' : '') +
     fetchErr +
     (viewModels.length ? catHtml :
@@ -866,6 +913,21 @@ async function load(){
         api('/api/wb/quota/refresh', 'POST', {})
           .then(()=>{ window._wbSyncing = false; load(); })
           .catch(()=>{ window._wbSyncing = false; });
+      }
+    }
+  }catch(e){}
+  // Copilot 配额超过 10 分钟未同步 → 后台同步一次再重渲染（只读 check-usage，不耗配额）
+  try{
+    const hasCp = (STATE.providers||[]).some(isCopilotProvider);
+    if(hasCp && !window._cpSyncing){
+      const st3 = (STATE.copilot_quota||{}).synced_at || '';
+      const tSrv3 = Date.parse((STATE.server_time||'').replace(' ','T'));
+      const tSyn3 = st3 ? Date.parse(st3.replace(' ','T')) : 0;
+      if(!st3 || (tSrv3 - tSyn3) > 600000){
+        window._cpSyncing = true;
+        api('/api/copilot/quota/refresh', 'POST', {})
+          .then(()=>{ window._cpSyncing = false; load(); })
+          .catch(()=>{ window._cpSyncing = false; });
       }
     }
   }catch(e){}
