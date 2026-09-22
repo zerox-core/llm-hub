@@ -1,12 +1,15 @@
 /* HUB Model Card — injected into dsh frontend by F:\llm_hub\dsh_patch\patch_dsh.py
    Mounts a model-switch button next to the "标准模式" dropdown inside the dsh panel.
-   Talks to the local LLM Key Hub (127.0.0.1:8787) pin API. No external deps. */
+   Talks to the LLM Key Hub pin API through the same-origin /hub-proxy route
+   (@dsh-local/hub-proxy cordis plugin) — direct cross-origin calls to
+   hub.zeroxcore.tech fail CORS preflight (nginx auth_basic + origin allowlist),
+   so the hub credential stays server-side. No external deps. */
 (function () {
   if (window.__hubModelCard) { return; }
   window.__hubModelCard = true;
 
-  var HUB = 'https://hub.zeroxcore.tech';
-  var HUB_HEADERS = { Authorization: 'Basic ' + btoa('hubadmin:f844c52d260ac865') };
+  var HUB = '/hub-proxy';
+  var HUB_HEADERS = {};
   var FALLBACK_AFTER = (typeof window.__hubMcFallbackAfter === 'number') ? window.__hubMcFallbackAfter : 20;
   var state = { model: 'auto', options: [], loaded: false };
   var root = null, btn = null, labelEl = null, panel = null, toastTimer = null;
@@ -99,7 +102,7 @@
   function pick(m) {
     fetch(HUB + '/api/harness/model', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: HUB_HEADERS.Authorization },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: m })
     })
       .then(function (r) { return r.json(); })

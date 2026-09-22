@@ -1,0 +1,12 @@
+{
+  "name": "@dsh-local/hub-proxy",
+  "version": "0.1.0",
+  "description": "Same-origin proxy for the LLM Key Hub harness pin API (avoids page-side CORS/preflight failure; keeps hub credential server-side).",
+  "type": "module",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  }
+}

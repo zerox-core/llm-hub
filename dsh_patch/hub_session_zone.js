@@ -5,6 +5,10 @@
       删除文件=连 cwd 文件夹+会话存储一起删；仅删会话=只删会话与记忆数据
    3) 行内 📌 归属（方案 A 纯标记，2026-09-22 拍板）：把会话分区标记归属到某个
       项目工作区，行上显示「→ 项目名」；不改 cwd、不搬存储、不动文件
+   4) 列表显示美化（2026-09-22 R14 拍板）：机器命名（YYYY.MMDD-HH.mm）只保留在
+      后端文件夹；侧栏里每个分区显示为一条会话样式行——主文案 = 其内会话标题，
+      右侧小字 = 分区时间（MM-DD HH:mm）；分区的子级会话行隐藏，点分区行直接
+      进入会话。工作区选择菜单里的机器名同样替换为「会话 MM-DD HH:mm」。
    命名规则：YYYY.MMDD-HH.mm，同分钟冲突自动 (1) (2) 后缀（服务端处理）。
    无外部依赖；SPA 重渲染自动重挂（tick 模式同 hub_ui_kit）。 */
 (function () {
@@ -42,6 +46,7 @@
     + '.hub-zone-asg:hover{opacity:1;background:rgba(76,141,255,.2)}'
     + '.hub-zone-tag{font-size:10px;opacity:.55;margin-left:6px;white-space:nowrap;'
     + 'overflow:hidden;text-overflow:ellipsis;max-width:120px;vertical-align:middle}'
+    + '.hub-zone-time{font-size:10px;opacity:.5;margin-left:6px;white-space:nowrap;flex:none}'
     + '.hub-zone-mask{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:9999;'
     + 'display:flex;align-items:center;justify-content:center}'
     + '.hub-zone-modal{width:380px;max-width:92vw;background:#262b36;color:#e8eaf0;border-radius:12px;'
@@ -139,12 +144,12 @@
       'button[aria-label="在' + LQ + title + RQ + '中新建会话"]');
     if (b) {
       b.click();
-      toast('已进入新会话 ' + title);
+      toast('已进入新会话 ' + zoneFriendly(title));
       setTimeout(function () { refreshList(); }, 1500);
       return;
     }
     if (triesLeft <= 0) {
-      toast('分区 ' + title + ' 已建好，请手动点它的「新建会话」');
+      toast(zoneFriendly(title) + ' 已建好，请手动点它的「新建会话」');
       return;
     }
     setTimeout(function () { clickNativeNewSession(title, triesLeft - 1); }, 800);
@@ -197,7 +202,7 @@
     var w = zoneByTitle[title];
     if (!w) { toast('未找到分区信息，稍后再试'); refreshList(); return; }
     openModal(function (box) {
-      box.appendChild(el('h3', null, '删除会话「' + title + '」？'));
+      box.appendChild(el('h3', null, '删除会话「' + zoneFriendly(title) + '」？'));
       box.appendChild(el('div', null, '是否删除本会话的相关文件？'));
       var hint = el('div', null,
         '「删除文件」会连同该会话在分区文件夹里创建的文件、本地记忆数据一起删除（不可恢复）；' +
@@ -267,7 +272,7 @@
     var w = zoneByTitle[title];
     if (!w) { toast('未找到分区信息，稍后再试'); refreshList(); return; }
     openModal(function (box) {
-      box.appendChild(el('h3', null, '归属会话「' + title + '」'));
+      box.appendChild(el('h3', null, '归属会话「' + zoneFriendly(title) + '」'));
       var cur = el('div', null,
         w.project ? ('当前归属：' + w.project.title) : '当前未归属任何项目。');
       cur.style.opacity = '.75';
@@ -340,6 +345,127 @@
     return null;
   }
 
+  /* ---------- 显示名：机器命名只在后端文件夹，UI 显示友好名 ---------- */
+
+  function isZoneTitle(t) { return zoneTitles.indexOf(t) >= 0; }
+
+  /** 2026.0922-23.33 -> 09-22 23:33 */
+  function zoneTimeText(title) {
+    var m = /^(\d{4})\.(\d{2})(\d{2})-(\d{2})\.(\d{2})/.exec(title);
+    return m ? (m[2] + '-' + m[3] + ' ' + m[4] + ':' + m[5]) : '';
+  }
+
+  /** 菜单/弹窗用友好名：会话 09-22 23:33 (1) */
+  function zoneFriendly(title) {
+    var m = /^(\d{4})\.(\d{2})(\d{2})-(\d{2})\.(\d{2})(\(\d+\))?$/.exec(title);
+    if (!m) { return title; }
+    return '会话 ' + m[2] + '-' + m[3] + ' ' + m[4] + ':' + m[5] + (m[6] ? ' ' + m[6] : '');
+  }
+
+  /** 标记优先地取分区行的标题元素（首次 tick 时 DOM 还是机器名，靠 findTitleEl 定位后打标）。 */
+  function zoneTitleEl(row, machineTitle) {
+    var marked = row.querySelector('[data-hub-zone-title]');
+    if (marked) { return marked; }
+    var t = findTitleEl(row, machineTitle);
+    if (t) { t.setAttribute('data-hub-zone-title', machineTitle); }
+    return t;
+  }
+
+  /** 会话子行的标题文本（原生会话行第一个 span 即标题，第二个是相对时间）。 */
+  function sessionTitleOf(childRow) {
+    var sp = childRow.querySelector('span');
+    return sp ? (sp.textContent || '').trim() : '';
+  }
+
+  /**
+   * 打开分区内被隐藏的会话行：向子行内层元素派发完整鼠标事件序列。
+   * 仅 .click() 不会触发 dsh 原生的会话打开逻辑（它挂在 pointer/mouse 事件链上）。
+   */
+  function openZoneChild(t) {
+    var c = document.querySelector('[data-hub-zone-child="' + t + '"]');
+    if (!c) { return; }
+    var target = c.querySelector('a[href]') || c.querySelector('span') || c;
+    var seq = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
+    for (var i = 0; i < seq.length; i++) {
+      var type = seq[i];
+      var ev;
+      if (type.indexOf('pointer') === 0 && typeof PointerEvent === 'function') {
+        ev = new PointerEvent(type, { bubbles: true, cancelable: true, view: window, pointerId: 1, isPrimary: true, button: 0 });
+      } else {
+        ev = new MouseEvent(type, { bubbles: true, cancelable: true, view: window, button: 0 });
+      }
+      target.dispatchEvent(ev);
+    }
+  }
+
+  /**
+   * 把分区行重排成一条会话样式行：
+   * 主文案 = 其内会话标题 + 小字分区时间；隐藏子级会话行；点分区行 = 进会话。
+   */
+  function restyleZoneRows() {
+    var root = document.querySelector('.hHd-Xa_root');
+    if (!root) { return; }
+    var items = root.querySelectorAll('[role="treeitem"]');
+    var curZone = null;
+    var rows = {}, childOf = {};
+    var WP = '工作区' + LQ, OP = RQ + '的操作';
+    for (var i = 0; i < items.length; i++) {
+      var it = items[i];
+      var op = it.querySelector('button[aria-label^="' + WP + '"][aria-label$="' + OP + '"]');
+      if (op) {
+        var al = op.getAttribute('aria-label') || '';
+        var t = al.substring(WP.length, al.length - OP.length);
+        curZone = isZoneTitle(t) ? t : null;
+        if (curZone) { rows[curZone] = it; }
+        continue;
+      }
+      if (curZone && !childOf[curZone]) { childOf[curZone] = it; }
+    }
+    Object.keys(rows).forEach(function (t) {
+      var row = rows[t], child = childOf[t];
+      var titleEl = zoneTitleEl(row, t);
+      if (!titleEl) { return; }
+      var nameEl = titleEl.querySelector('[data-hub-zone-name]');
+      if (!nameEl) {
+        titleEl.textContent = '';
+        nameEl = el('span');
+        nameEl.setAttribute('data-hub-zone-name', t);
+        titleEl.appendChild(nameEl);
+        var timeEl = el('span', 'hub-zone-time');
+        timeEl.setAttribute('data-hub-zone-time', t);
+        titleEl.appendChild(timeEl);
+      }
+      var want = (child && sessionTitleOf(child)) || '新会话';
+      if (nameEl.textContent !== want) { nameEl.textContent = want; }
+      var ttEl = titleEl.querySelector('[data-hub-zone-time]');
+      var tt = zoneTimeText(t);
+      if (ttEl && ttEl.textContent !== tt) { ttEl.textContent = tt; }
+      if (child) {
+        child.setAttribute('data-hub-zone-child', t);
+        if (child.style.display !== 'none') { child.style.display = 'none'; }
+        if (!row.getAttribute('data-hub-zone-click')) {
+          row.setAttribute('data-hub-zone-click', '1');
+          row.addEventListener('click', function (e) {
+            if (e.target && e.target.closest && e.target.closest('button')) { return; }
+            setTimeout(function () { openZoneChild(t); }, 80);
+          });
+        }
+      }
+    });
+  }
+
+  /** 工作区选择菜单（含新建会话的工作区选择）里的机器名替换成友好名。 */
+  function restyleMenus() {
+    var mis = document.querySelectorAll('[role="menuitem"]');
+    for (var i = 0; i < mis.length; i++) {
+      var tx = (mis[i].textContent || '').trim();
+      if (!isZoneTitle(tx)) { continue; }
+      var target = findTitleEl(mis[i], tx) || mis[i];
+      var friendly = zoneFriendly(tx);
+      if (target.textContent !== friendly) { target.textContent = friendly; }
+    }
+  }
+
   function injectZoneRowControls() {
     for (var i = 0; i < zoneTitles.length; i++) {
       var title = zoneTitles[i];
@@ -392,7 +518,7 @@
         if (!wantText) { tag.parentNode.removeChild(tag); }
         else if (tag.textContent !== wantText) { tag.textContent = wantText; }
       } else if (wantText) {
-        var titleEl = findTitleEl(row, title);
+        var titleEl = zoneTitleEl(row, title);
         if (titleEl) {
           var nt = el('span', 'hub-zone-tag', wantText);
           nt.setAttribute('data-zone-tag', title);
@@ -411,6 +537,8 @@
     if (!sb) { return; }
     mountBar();
     injectZoneRowControls();
+    restyleZoneRows();
+    restyleMenus();
     tickN++;
     if (tickN % 15 === 0) { refreshList(); } // 约 13s 一次后台刷新
   }
