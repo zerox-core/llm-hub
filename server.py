@@ -2668,7 +2668,8 @@ def _dsh_start():
         log_fh = open(DSH_LOG_FILE, "ab")
         try:
             proc = subprocess.Popen(
-                [node_exe, bin_js, "web", "--no-open"],
+                [node_exe, bin_js, "web", "--no-open",
+                 "--trusted-host", "dsh.zeroxcore.tech"],
                 cwd=str(BASE_DIR), env=env,
                 stdout=log_fh, stderr=subprocess.STDOUT,
                 creationflags=0x00000008 | 0x00000200)
