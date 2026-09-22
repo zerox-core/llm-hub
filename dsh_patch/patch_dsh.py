@@ -6,8 +6,9 @@
     py patch_dsh.py --restore  # 移除全部注入，恢复原样
 
 注入块（BLOCKS 顺序即注入顺序）：
-    hub_model_card.js  模型切换卡片
-    hub_ui_kit.js      手动更新按钮 + 侧栏箭头收起/边缘弹出 + 页面全铺开
+    hub_model_card.js   模型切换卡片
+    hub_ui_kit.js       手动更新按钮 + 侧栏箭头收起/边缘弹出 + 页面全铺开
+    hub_session_zone.js 会话区（时间分区创建 + 删除双选项弹窗）
 
 原理：dsh 的 SPA 静态服务每个请求都会读一次 dist/index.html，
 所以补丁无需重启 dsh，刷新页面即生效。dsh 包升级会覆盖 dist，
@@ -22,6 +23,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 BLOCKS = [
     ("hub_model_card.js", "<!-- HUB-MODEL-CARD BEGIN -->", "<!-- HUB-MODEL-CARD END -->"),
     ("hub_ui_kit.js", "<!-- HUB-UI-KIT BEGIN -->", "<!-- HUB-UI-KIT END -->"),
+    ("hub_session_zone.js", "<!-- HUB-SESSION-ZONE BEGIN -->", "<!-- HUB-SESSION-ZONE END -->"),
 ]
 
 CANDIDATES = [

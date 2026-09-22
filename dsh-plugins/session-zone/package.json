@@ -1,0 +1,12 @@
+{
+  "name": "@dsh-local/session-zone",
+  "version": "0.1.0",
+  "description": "Session zone (playground time-partitioned session workspaces): create/list/delete routes over workspaceRegistry.",
+  "type": "module",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  }
+}
