@@ -13,7 +13,7 @@ import fs from "node:fs";
 const APP_DIR = "F:\\deepseek-harness\\app";
 const PKG_JSON = APP_DIR + "\\node_modules\\@deepseek-ai\\dsh\\package.json";
 const REGISTRY = "https://registry.npmjs.org/@deepseek-ai%2Fdsh";
-const RESTARTER = "F:\\llm_hub\\_dsh_restarter.py";
+const RESTARTER = "F:\\llm_hub\\dsh_patch\\dsh_restarter.py";
 const PY_EXE = "C:\\Windows\\py.EXE";
 const RESULT_FILE = "F:\\llm_hub\\_push\\dsh_update_result.json";
 
