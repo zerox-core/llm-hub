@@ -3,6 +3,8 @@ setlocal
 title DeepSeek Harness - cloud hub
 echo === DeepSeek Harness launcher ^(dsh => cloud https://hub.zeroxcore.tech^) ===
 if not exist "F:\llm_hub\logs" mkdir "F:\llm_hub\logs"
+rem R8: pin dsh home to migrated location (grouped settings.yaml lives here)
+set "DSH_HOME=F:\deepseek-harness\home"
 
 powershell -NoProfile -Command "$found=$false; foreach ($p in (Get-CimInstance Win32_Process -Filter \"Name='node.exe'\")) { if ($p.CommandLine -like '*dsh*bin.js*') { $found=$true } }; if ($found) { exit 0 } else { exit 1 }"
 if %errorlevel%==0 (
