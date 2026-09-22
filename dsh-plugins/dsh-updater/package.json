@@ -1,0 +1,12 @@
+{
+  "name": "@dsh-local/dsh-updater",
+  "version": "0.1.0",
+  "description": "Manual update button backend for dsh: same-origin status/update routes; spawns detached restarter then exits for restart.",
+  "type": "module",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  }
+}
