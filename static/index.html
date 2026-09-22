@@ -10,7 +10,7 @@
 <aside class="sidebar">
   <div class="side-brand side-brand-row">LLM Key Hub<button class="side-toggle" data-side-toggle title="收起侧栏">«</button><small>本地大模型钥匙管理</small></div>
   <nav class="side-nav">
-    <a href="/harness"><span class="ico">◆</span>DeepSeek Harness</a>
+    <a href="/harness" class="only-local"><span class="ico">◆</span>DeepSeek Harness</a>
     <a href="/" class="on" id="navOverview" onclick="backToOverview();return false"><span class="ico">▦</span>渠道总览</a>
     <div id="sideProviders" class="side-prov"></div>
     <a href="/monitor"><span class="ico">≡</span>调用监控</a>
@@ -71,7 +71,7 @@
       <span>号池分组（顶部为全部号池共用；每个号池自己的 key + auto 轮询，dsh 内同名分组自动同步）</span>
       <button class="small" onclick="addPool()">+ 空白号池</button>
       <button class="small" onclick="openPoolPicker(null)">+ 模型组合号池</button>
-      <button class="small" onclick="syncDsh()">同步到 dsh</button>
+      <button class="small only-local" onclick="syncDsh()">同步到 dsh</button>
     </div>
     <div class="card pool-panel" id="poolPanel"></div>
     <div class="sec-title" style="display:flex;align-items:center;gap:10px">
@@ -1245,6 +1245,7 @@ async function pollWbAuth(){
 async function load(){
   _openCats = snapshotOpenCats();
   STATE = await api('/api/state');
+  if(STATE.cloud_mode){ document.querySelectorAll('.only-local').forEach(el=>{ el.style.display='none'; }); }
   render();
   // 反重力额度超过 10 分钟未同步 → 后台同步一次再重渲染（不消耗对话额度）
   try{

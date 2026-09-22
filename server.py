@@ -749,6 +749,7 @@ def state():
         "pools": _pool_view(d),
         "harness_model": d.get("harness_model") or "auto",
         "autostart_harness": bool(d.get("autostart_harness", True)),
+        "cloud_mode": bool(os.environ.get("HUB_CLOUD")),
         "copilot_quota": d.get("copilot_quota") or {},
         "autostart_copilot": bool(d.get("autostart_copilot", True)),
         "call_config": d.get("call_config") or {"mode": "lan", "public_host": ""},
