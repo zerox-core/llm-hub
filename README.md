@@ -20,12 +20,12 @@
   - 响应头 `X-Hub-Provider` / `X-Hub-Model`：标明本次实际命中的渠道与模型
 - **统一鉴权**：`/v1` 接口需携带 Hub 自动生成的统一 key（面板顶部查看、点击复制）
 - **调用监控**：每次调用的渠道 / 模型 / 耗时 / token / 成败全量日志与统计页（/monitor）
-- **桌面一键启动**：`start_all.bat` 同时拉起反重力代理与 Hub 面板
+- **桌面一键启动**：日常用 `start_dsh.bat`（启动 dsh 连云端并打开云端面板）；测试开发用 `start_test_hub.bat`（纯本机 hub，不对接 dsh、不上公网）
 
 ## 快速开始
 
 1. Python 3.10+，安装依赖：`pip install fastapi uvicorn httpx pydantic`
-2. 双击 `start.bat`（或 `py -3 server.py`），浏览器打开 http://127.0.0.1:8787
+2. 日常：双击 `start_dsh.bat`；测试开发：双击 `start_test_hub.bat`（或 `py -3 server.py`），浏览器打开 http://127.0.0.1:8787
 3. 点「+ 添加渠道」，填入 Base URL 和 API Key，模型列表自动拉取
 4. 渠道卡片点「复制轮询三件套」，把 BASE_URL / API_KEY / MODEL=auto 贴进任何 OpenAI 兼容客户端即可
 
@@ -55,4 +55,4 @@
 - `server.py` —— FastAPI 服务（面板 API + 统一入口 + 额度同步 + 监控）
 - `static/index.html` —— 渠道管理面板
 - `static/monitor.html` —— 调用监控页
-- `start.bat` / `start_all.bat` —— 启动脚本（幂等，重复启动不会起第二个实例）
+- `start_dsh.bat` / `start_test_hub.bat` —— 启动脚本（幂等，重复启动不会起第二个实例）
