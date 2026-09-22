@@ -75,6 +75,7 @@ function render(st){
     f.style.display = 'block';
     $('#downPane').style.display = 'none';
     $('#frameTools').style.display = 'flex';
+    $('#btnStop').style.display = 'inline-block';
     $('#openTab').href = abs;
   }else{
     $('#dshFrame').style.display = 'none';
@@ -140,6 +141,18 @@ function renderCloud(st){
   $('#stDot').className = 'dot ' + (STATE.running ? 'ok' : 'bad');
   $('#stChip').textContent = STATE.running ? '本机运行中' : '本机未运行';
   $('#stChip').className = 'chip ' + (STATE.running ? 'ok' : 'bad');
+  const embed = (STATE.running && st.embed_url) ? st.embed_url : '';
+  if(embed){
+    STATE.url = embed;
+    const f = $('#dshFrame');
+    if(f.src !== embed){ f.src = embed; }
+    f.style.display = 'block';
+    $('#downPane').style.display = 'none';
+    $('#frameTools').style.display = 'flex';
+    $('#btnStop').style.display = 'none';
+    $('#openTab').href = embed;
+    return;
+  }
   $('#dshFrame').style.display = 'none';
   $('#downPane').style.display = 'flex';
   $('#frameTools').style.display = 'none';
@@ -148,7 +161,7 @@ function renderCloud(st){
   else if(st.hb_age != null){ hbTxt = '上一次心跳在 ' + Math.round(st.hb_age) + ' 秒前——本机 dsh 已停止或被关闭，重新双击桌面启动器即可。'; }
   else { hbTxt = '尚未收到本机心跳——请双击桌面「LLM Hub-日常开发」启动器。'; }
   const sub2 = document.querySelector('#downPane .sub');
-  if(sub2) sub2.innerHTML = 'DeepSeek Harness 运行在<b>打开此页面的电脑</b>上（http://127.0.0.1:' + port + '），模型出口走云端 hub.zeroxcore.tech。' + hbTxt + '<br>由于浏览器的跨站会话安全策略，从云端页面点击无法直接替你完成本机 dsh 的登录——平时双击桌面「LLM Hub-日常开发」启动器会直接打开已登录的 dsh；需要从面板进入时，用下方按钮复制地址，粘贴到新标签页<b>地址栏</b>打开即可。';
+  if(sub2) sub2.innerHTML = 'DeepSeek Harness 运行在<b>打开此页面的电脑</b>上（http://127.0.0.1:' + port + '），模型出口走云端 hub.zeroxcore.tech。' + hbTxt + '<br>本机启动器会同时拉起一条反向隧道（把本机 dsh 映射到 dsh.zeroxcore.tech），隧道就绪时本页会直接内嵌 dsh；当前隧道未就绪，退回备用模式——用下方按钮复制地址，粘贴到新标签页<b>地址栏</b>打开即可。';
   const btn = $('#btnStart');
   btn.style.display = 'inline-block';
   btn.disabled = false;

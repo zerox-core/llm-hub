@@ -2574,6 +2574,8 @@ def _dsh_pid_by_port():
 # ---------------- 本机 dsh 心跳（云端面板连通性检测，启动器每 30s 上报） ----------------
 _DSH_HB = {"ts": 0.0, "token": "", "port": 0}
 _DSH_HB_TTL = 90.0
+# R7: 公网内嵌地址（ssh 反向隧道 + nginx 子域）；云端 compose 显式设置 DSH_EMBED_BASE 才启用
+DSH_EMBED_BASE = os.environ.get("DSH_EMBED_BASE", "").strip().rstrip("/")
 
 
 class DshHeartbeatIn(BaseModel):
@@ -2598,12 +2600,14 @@ def _dsh_status():
         fresh = hb_age is not None and hb_age <= _DSH_HB_TTL
         port = _DSH_HB["port"] or DSH_PORT
         url = ("http://127.0.0.1:%d/?token=%s" % (port, _DSH_HB["token"])) if _DSH_HB["token"] else ("http://127.0.0.1:%d/" % port)
+        embed_url = ("%s/?token=%s" % (DSH_EMBED_BASE, _DSH_HB["token"])) if (DSH_EMBED_BASE and _DSH_HB["token"]) else ""
         return {
             "running": fresh,
             "port": port,
             "cloud_mode": True,
             "hb_age": round(hb_age, 1) if hb_age is not None else None,
             "url": url,
+            "embed_url": embed_url,
             "settings_ok": False,
             "settings_path": "",
         }

@@ -26,6 +26,10 @@ powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"Name='po
 powershell -NoProfile -Command "Start-Process powershell -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','F:\llm_hub\hub_heartbeat.ps1'"
 echo [ok] cloud heartbeat started ^(every 30s =^> hub.zeroxcore.tech^)
 
+powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"Name='ssh.exe'\" | Where-Object {$_.CommandLine -like '*13080:127.0.0.1:3080*'} | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+powershell -NoProfile -Command "Start-Process powershell -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','F:\llm_hub\hub_tunnel.ps1'"
+echo [ok] reverse tunnel started ^(dsh.zeroxcore.tech =^> local dsh 3080^)
+
 echo [ok] opening local dsh ^(authenticated^)
 start "" "http://127.0.0.1:3080/?token=%DSHTOK%"
 
