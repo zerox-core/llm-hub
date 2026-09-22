@@ -1,4 +1,4 @@
-# hub-heartbeat-r6b: report local dsh liveness to cloud hub every 30s
+# hub-heartbeat-r6: report local dsh liveness to cloud hub every 30s
 $ErrorActionPreference = 'SilentlyContinue'
 $log = 'F:\llm_hub\logs\heartbeat.log'
 $cfg = Get-Content 'F:\llm_hub\data.json' -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -16,5 +16,5 @@ while ($true) {
     } catch { $fail++; Add-Content $log ("{0} post-fail {1}: {2}" -f (Get-Date -Format s), $fail, $_.Exception.Message) }
   } else { $fail += 2 }
   if ($fail -ge 6) { Add-Content $log ("{0} giving up after {1} fails" -f (Get-Date -Format s), $fail); break }
-  Start-Sleep -Seconds 30
+  if ($fail -gt 0) { Start-Sleep -Seconds 10 } else { Start-Sleep -Seconds 30 }
 }

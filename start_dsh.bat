@@ -26,8 +26,12 @@ powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"Name='po
 powershell -NoProfile -Command "Start-Process powershell -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','F:\llm_hub\hub_heartbeat.ps1'"
 echo [ok] cloud heartbeat started ^(every 30s =^> hub.zeroxcore.tech^)
 
+echo [ok] opening local dsh ^(authenticated^)
+start "" "http://127.0.0.1:3080/?token=%DSHTOK%"
+
 echo [ok] opening cloud panel
 start "" "https://hub.zeroxcore.tech/harness#dsh-token=%DSHTOK%"
+
 echo === launcher done, this window closes in 5 seconds ===
 timeout /t 5 >nul
 endlocal

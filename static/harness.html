@@ -148,14 +148,21 @@ function renderCloud(st){
   else if(st.hb_age != null){ hbTxt = '上一次心跳在 ' + Math.round(st.hb_age) + ' 秒前——本机 dsh 已停止或被关闭，重新双击桌面启动器即可。'; }
   else { hbTxt = '尚未收到本机心跳——请双击桌面「LLM Hub-日常开发」启动器。'; }
   const sub2 = document.querySelector('#downPane .sub');
-  if(sub2) sub2.innerHTML = 'DeepSeek Harness 运行在<b>打开此页面的电脑</b>上（http://127.0.0.1:' + port + '），模型出口走云端 hub.zeroxcore.tech。' + hbTxt + '<br>由于 dsh 的跨站会话策略，云端面板不能内嵌它——运行中时用下方按钮在新标签页打开。';
+  if(sub2) sub2.innerHTML = 'DeepSeek Harness 运行在<b>打开此页面的电脑</b>上（http://127.0.0.1:' + port + '），模型出口走云端 hub.zeroxcore.tech。' + hbTxt + '<br>由于浏览器的跨站会话安全策略，从云端页面点击无法直接替你完成本机 dsh 的登录——平时双击桌面「LLM Hub-日常开发」启动器会直接打开已登录的 dsh；需要从面板进入时，用下方按钮复制地址，粘贴到新标签页<b>地址栏</b>打开即可。';
   const btn = $('#btnStart');
   btn.style.display = 'inline-block';
   btn.disabled = false;
-  btn.textContent = STATE.running ? '↗ 在新标签页打开本机 dsh' : '本机 dsh 未运行（请先运行桌面启动器）';
+  btn.textContent = STATE.running ? '复制本机 dsh 地址' : '本机 dsh 未运行（请先运行桌面启动器）';
   btn.onclick = function(){
-    if(STATE.running){ window.open(STATE.url, '_blank', 'noopener'); }
-    else{ toast('本机 dsh 未运行：请双击桌面「LLM Hub-日常开发」启动器', true); }
+    if(STATE.running){
+      const sayOk = function(){ toast('已复制——请在新标签页地址栏粘贴打开本机 dsh'); };
+      const sayManual = function(){ window.prompt('浏览器拒绝了自动复制，请手动复制下面的地址，粘贴到新标签页打开：', STATE.url); };
+      if(navigator.clipboard && navigator.clipboard.writeText){
+        navigator.clipboard.writeText(STATE.url).then(sayOk).catch(sayManual);
+      }else{ sayManual(); }
+    }else{
+      toast('本机 dsh 未运行：请双击桌面「LLM Hub-日常开发」启动器', true);
+    }
   };
 }
 
