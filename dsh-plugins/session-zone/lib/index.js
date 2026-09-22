@@ -2,17 +2,25 @@
 /**
  * 会话区（playground 时间分区）后端：同源 HTTP 路由挂在 dsh web server 上。
  *
- *   GET  /zone/api/list     列出会话区内的工作区（path 位于 ZONE_ROOT 下）
- *   POST /zone/api/create   建 YYYY.MMDD-HH.mm[(n)] 子目录 + workspaceRegistry.create
- *   POST /zone/api/delete   {workspaceId, deleteFiles} 归档会话 + 删工作区注册 +
- *                           删会话存储（session.v3.jsonl.zstd 与 projcache），
- *                           deleteFiles=true 时连 cwd 文件夹一起删
+ *   GET  /zone/api/list      列出会话区内的工作区（path 位于 ZONE_ROOT 下），
+ *                            每项带 project 归属标记（方案 A 纯标记，2026-09-22 拍板）
+ *   POST /zone/api/create    建 YYYY.MMDD-HH.mm[(n)] 子目录 + workspaceRegistry.create
+ *   POST /zone/api/delete    {workspaceId, deleteFiles} 归档会话 + 删工作区注册 +
+ *                            删会话存储（session.v3.jsonl.zstd 与 projcache），
+ *                            deleteFiles=true 时连 cwd 文件夹一起删
+ *   GET  /zone/api/projects  列出非会话区工作区（归属候选目标）
+ *   POST /zone/api/assign    {workspaceId, projectId} 标记会话分区归属到项目工作区
+ *   POST /zone/api/unassign  {workspaceId} 取消归属标记
  *
  * 命名规则（用户 2026-09-22 拍板）：按时间分区 YYYY.MMDD-HH.mm，
  * 同一分钟内冲突追加 (1) (2) ... 后缀。
  *
- * 安全边界：delete 只放行 ZONE_ROOT 下的工作区；会话存储目录按 sessionId
- * 精确匹配目录名，不做模糊删除。
+ * 归属规则（用户 2026-09-22 拍板，方案 A）：纯标记——不改会话 cwd、不搬存储、
+ * 不动文件，只在 .zone-attribution.json 记 zoneWorkspaceId -> projectWorkspaceId；
+ * dsh 原生视角会话仍属于会话区工作区（原生 attach 强制校验 header.cwd canon）。
+ *
+ * 安全边界：delete 只放行 ZONE_ROOT 下的工作区；assign 只放行 ZONE_ROOT 下的
+ * 工作区且目标必须在 ZONE_ROOT 之外；会话存储目录按 sessionId 精确匹配目录名。
  */
 
 import fs from "node:fs";
@@ -22,6 +30,7 @@ const ZONE_ROOT = "F:\\deepseek-harness\\playground";
 const HOME_DIR = "F:\\deepseek-harness\\home";
 const SESSIONS_DIR = HOME_DIR + "\\sessions";
 const PROJCACHE_DIR = HOME_DIR + "\\storages\\session_projcache\\sessions";
+const ATTR_FILE = ZONE_ROOT + "\\.zone-attribution.json";
 
 /** 会话日志 30 秒内还有写入就拒绝删除（防止删到正在进行的会话）。 */
 const ACTIVE_GRACE_MS = 30000;
@@ -63,6 +72,21 @@ function isUnderZone(p) {
   const norm = path.resolve(String(p || "")).toLowerCase();
   const root = path.resolve(ZONE_ROOT).toLowerCase();
   return norm.startsWith(root + path.sep);
+}
+
+/** 归属映射读写（zoneWorkspaceId -> projectWorkspaceId），坏文件当空处理。 */
+function loadAttr() {
+  try {
+    const m = JSON.parse(fs.readFileSync(ATTR_FILE, "utf8"));
+    return m && typeof m === "object" && !Array.isArray(m) ? m : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveAttr(m) {
+  fs.mkdirSync(ZONE_ROOT, { recursive: true });
+  fs.writeFileSync(ATTR_FILE, JSON.stringify(m, null, 1), "utf8");
 }
 
 /** 在 home\sessions 下按目录名精确找 session-<uuid>（两层：--slug--\session-uuid）。 */
@@ -146,8 +170,24 @@ function apply(ctx) {
     res.end(JSON.stringify(obj));
   };
 
-  const zoneList = () =>
-    ctx.workspaceRegistry
+  const allById = () => {
+    const byId = {};
+    for (const w of ctx.workspaceRegistry.list()) byId[String(w.id)] = w;
+    return byId;
+  };
+
+  /** 归属目标校验：映射里的 projectId 仍存在且在会话区外才算有效。 */
+  const resolveProject = (byId, pid) => {
+    const pw = pid ? byId[String(pid)] : null;
+    return pw && !isUnderZone(pw.path)
+      ? { id: String(pw.id), title: pw.title, path: pw.path }
+      : null;
+  };
+
+  const zoneList = () => {
+    const attr = loadAttr();
+    const byId = allById();
+    return ctx.workspaceRegistry
       .list()
       .filter((w) => isUnderZone(w.path))
       .map((w) => ({
@@ -156,7 +196,9 @@ function apply(ctx) {
         title: w.title,
         createdAt: w.createdAt,
         sessionIds: w.sessionIds.map((s) => String(s)),
+        project: resolveProject(byId, attr[String(w.id)]),
       }));
+  };
 
   ctx.effect(() =>
     ctx.webServer.register({
@@ -165,6 +207,114 @@ function apply(ctx) {
       handler: async (_req, res) => {
         try {
           send(res, 200, { ok: true, zoneRoot: ZONE_ROOT, workspaces: zoneList() });
+        } catch (e) {
+          send(res, 500, { ok: false, error: String((e && e.message) || e) });
+        }
+      },
+    })
+  );
+
+  ctx.effect(() =>
+    ctx.webServer.register({
+      kind: "exact",
+      path: "/zone/api/projects",
+      handler: async (_req, res) => {
+        try {
+          const projects = ctx.workspaceRegistry
+            .list()
+            .filter((w) => !isUnderZone(w.path))
+            .map((w) => ({ id: String(w.id), title: w.title, path: w.path }));
+          send(res, 200, { ok: true, projects });
+        } catch (e) {
+          send(res, 500, { ok: false, error: String((e && e.message) || e) });
+        }
+      },
+    })
+  );
+
+  ctx.effect(() =>
+    ctx.webServer.register({
+      kind: "exact",
+      path: "/zone/api/assign",
+      handler: async (req, res) => {
+        if (req.method !== "POST") {
+          send(res, 405, { ok: false, error: "POST only" });
+          return;
+        }
+        let body;
+        try {
+          body = JSON.parse((await readBody(req)) || "{}");
+        } catch {
+          send(res, 400, { ok: false, error: "bad json" });
+          return;
+        }
+        const workspaceId = String(body.workspaceId || "");
+        const projectId = String(body.projectId || "");
+        if (!workspaceId || !projectId) {
+          send(res, 400, { ok: false, error: "workspaceId 与 projectId 均必填" });
+          return;
+        }
+        try {
+          const ws = ctx.workspaceRegistry.get(workspaceId);
+          if (!ws) {
+            send(res, 404, { ok: false, error: "workspace not found" });
+            return;
+          }
+          if (!isUnderZone(ws.path)) {
+            send(res, 403, { ok: false, error: "仅会话区内的工作区可标记归属" });
+            return;
+          }
+          const pw = ctx.workspaceRegistry.get(projectId);
+          if (!pw) {
+            send(res, 404, { ok: false, error: "project workspace not found" });
+            return;
+          }
+          if (isUnderZone(pw.path)) {
+            send(res, 400, { ok: false, error: "不能归属到另一个会话分区" });
+            return;
+          }
+          const attr = loadAttr();
+          attr[String(ws.id)] = String(pw.id);
+          saveAttr(attr);
+          send(res, 200, {
+            ok: true,
+            workspaceId: String(ws.id),
+            project: { id: String(pw.id), title: pw.title, path: pw.path },
+          });
+        } catch (e) {
+          send(res, 500, { ok: false, error: String((e && e.message) || e) });
+        }
+      },
+    })
+  );
+
+  ctx.effect(() =>
+    ctx.webServer.register({
+      kind: "exact",
+      path: "/zone/api/unassign",
+      handler: async (req, res) => {
+        if (req.method !== "POST") {
+          send(res, 405, { ok: false, error: "POST only" });
+          return;
+        }
+        let body;
+        try {
+          body = JSON.parse((await readBody(req)) || "{}");
+        } catch {
+          send(res, 400, { ok: false, error: "bad json" });
+          return;
+        }
+        const workspaceId = String(body.workspaceId || "");
+        if (!workspaceId) {
+          send(res, 400, { ok: false, error: "workspaceId required" });
+          return;
+        }
+        try {
+          const attr = loadAttr();
+          const had = Object.hasOwn(attr, workspaceId);
+          delete attr[workspaceId];
+          saveAttr(attr);
+          send(res, 200, { ok: true, workspaceId, removed: had });
         } catch (e) {
           send(res, 500, { ok: false, error: String((e && e.message) || e) });
         }
@@ -282,6 +432,12 @@ function apply(ctx) {
             } catch {
               /* 非空，保留 */
             }
+          }
+          // 5) 顺手清掉这条归属标记
+          const attr = loadAttr();
+          if (Object.hasOwn(attr, workspaceId)) {
+            delete attr[workspaceId];
+            saveAttr(attr);
           }
           send(res, 200, {
             ok: true,
