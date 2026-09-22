@@ -1,0 +1,8 @@
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY cli-proxy-api /app/cli-proxy-api
+COPY config.yaml /app/config.yaml
+COPY plugins /app/plugins
+RUN chmod +x /app/cli-proxy-api
+CMD ["/app/cli-proxy-api", "-config", "/app/config.yaml"]

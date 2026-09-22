@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LLM Key Hub · DeepSeek Harness</title>
+<link rel="stylesheet" href="/static/hub.css?v=9">
+</head>
+<body class="page-harness">
+<aside class="sidebar">
+  <div class="side-brand side-brand-row">LLM Key Hub<button class="side-toggle" data-side-toggle title="收起侧栏">«</button><small>本地大模型钥匙管理</small></div>
+  <nav class="side-nav">
+    <a href="/harness" class="on"><span class="ico">◆</span>DeepSeek Harness</a>
+    <a href="/"><span class="ico">▦</span>渠道管理</a>
+    <a href="/monitor"><span class="ico">≡</span>调用监控</a>
+  </nav>
+  <div class="side-foot" id="sideFoot">仅监听本机回环<br>http://127.0.0.1:8787</div>
+</aside>
+<button class="side-expand" data-side-toggle title="展开侧栏">☰</button>
+<div class="main">
+  <div class="shell-bar">
+    <div class="spacer"></div>
+    <div id="frameTools" class="frame-tools" style="display:none">
+      <a id="openTab" href="#" target="_blank" rel="noopener">⤢ 新标签</a>
+      <button id="btnStop" onclick="stopDsh()" title="停止 dsh 服务">⏻ 停止</button>
+    </div>
+  </div>
+  <div class="frame-wrap">
+    <iframe id="dshFrame" src="about:blank" title="DeepSeek Harness Web UI" style="display:none"></iframe>
+    <div id="downPane" class="harness-down">
+      <div class="big"><span id="stDot" class="dot bad"></span> DeepSeek Harness <span id="stChip" class="chip">检测中…</span></div>
+      <div class="sub">dsh web 服务未在运行。模型切换走 dsh 内置模型列表：顶部「Hub · 全部号池」分组 = 全部号池共用 key（auto = 跨池大轮询）；每个号池一个同名分组（各自 key、auto 只在池内轮询）。分组由渠道管理页的号池面板自动同步到 dsh；出口 <code>127.0.0.1:8787/v1</code>。</div>
+      <button id="btnStart" class="primary" onclick="startDsh()">启动 DeepSeek Harness</button>
+    </div>
+  </div>
+</div>
+<div id="toast"></div>
+
+<script src="/static/hub.js?v=6"></script>
+<script>
+let STATE = {running: false, url: 'http://127.0.0.1:3080/', cloud: false, port: 3080};
+const $ = s => document.querySelector(s);
+
+function toast(msg, isErr){
+  const t = document.createElement('div');
+  t.className = 'toast' + (isErr ? ' err' : '');
+  t.textContent = msg;
+  $('#toast').appendChild(t);
+  setTimeout(()=>t.remove(), isErr ? 7000 : 3000);
+}
+
+async function api(path, method, body){
+  const opt = {method: method||'GET', headers:{'Content-Type':'application/json'}};
+  if(body !== undefined) opt.body = JSON.stringify(body);
+  const r = await fetch(path, opt);
+  if(!r.ok){
+    let msg = 'HTTP ' + r.status;
+    try{ const j = await r.json(); msg = (j.error && j.error.message) || j.message || j.detail || msg; }catch(e){}
+    throw new Error(msg);
+  }
+  return await r.json();
+}
+
+function render(st){
+  if(st.cloud_mode || STATE.cloud){ STATE.cloud = true; STATE.port = st.port || STATE.port; renderCloud(st); return; }
+  STATE.running = !!st.running;
+  STATE.url = st.url || STATE.url;
+  $('#stDot').className = 'dot ' + (st.running ? 'ok' : 'bad');
+  $('#stChip').textContent = st.running ? '运行中' : '未运行';
+  $('#stChip').className = 'chip ' + (st.running ? 'ok' : 'bad');
+  if(st.running){
+    const f = $('#dshFrame');
+    const abs = new URL(st.url, location.href).href;
+    if(f.src !== abs){ f.src = abs; }
+    f.style.display = 'block';
+    $('#downPane').style.display = 'none';
+    $('#frameTools').style.display = 'flex';
+    $('#openTab').href = abs;
+  }else{
+    $('#dshFrame').style.display = 'none';
+    $('#downPane').style.display = 'flex';
+    $('#frameTools').style.display = 'none';
+    $('#btnStart').disabled = false;
+  }
+}
+
+async function refresh(){
+  try{
+    const st = await api('/api/harness/status');
+    if(st.cloud_mode){
+      STATE.cloud = true;
+      STATE.port = st.port || 3080;
+      const m = location.hash.match(/dsh-token=([A-Za-z0-9_-]+)/);
+      if(m){ try{ localStorage.setItem('dshToken', m[1]); }catch(e2){} try{ history.replaceState(null, '', location.pathname); }catch(e3){} }
+      if(st.url && st.url.indexOf('token=') > 0){
+        STATE.url = st.url;
+      }else{
+        let tok = ''; try{ tok = localStorage.getItem('dshToken') || ''; }catch(e4){}
+        STATE.url = 'http://127.0.0.1:' + STATE.port + '/' + (tok ? '?token=' + tok : '');
+      }
+    }
+    render(st);
+  }catch(e){
+    $('#stChip').textContent = 'Hub 接口异常';
+    $('#stChip').className = 'chip bad';
+  }
+}
+
+async function startDsh(){
+  $('#btnStart').disabled = true;
+  $('#stChip').textContent = '启动中…（首次约需数秒）';
+  $('#stChip').className = 'chip';
+  try{
+    const r = await api('/api/harness/start', 'POST', {});
+    if(r.ok){ toast(r.started ? 'dsh web 已启动' : 'dsh web 已在运行'); }
+    else{ toast(r.message || '启动失败', true); }
+  }catch(e){
+    toast('启动请求失败：' + e.message, true);
+  }
+  await refresh();
+}
+
+async function stopDsh(){
+  $('#btnStop').disabled = true;
+  try{
+    const r = await api('/api/harness/stop', 'POST', {});
+    toast(r.ok ? (r.message || '已停止') : (r.message || '停止失败'), !r.ok);
+  }catch(e){
+    toast('停止请求失败：' + e.message, true);
+  }
+  $('#btnStop').disabled = false;
+  await refresh();
+}
+
+// ---- 云端面板模式：dsh 跑在浏览者本机，状态来自本机启动器的心跳上报 ----
+function renderCloud(st){
+  STATE.running = !!st.running;
+  const port = STATE.port;
+  $('#sideFoot').innerHTML = '云端面板 · dsh 在本机<br>http://127.0.0.1:' + port;
+  $('#stDot').className = 'dot ' + (STATE.running ? 'ok' : 'bad');
+  $('#stChip').textContent = STATE.running ? '本机运行中' : '本机未运行';
+  $('#stChip').className = 'chip ' + (STATE.running ? 'ok' : 'bad');
+  $('#dshFrame').style.display = 'none';
+  $('#downPane').style.display = 'flex';
+  $('#frameTools').style.display = 'none';
+  let hbTxt = '';
+  if(STATE.running){ hbTxt = '连通性由本机启动器每 30 秒心跳上报；dsh 停止或电脑关机后约 90 秒，这里自动变为未运行。'; }
+  else if(st.hb_age != null){ hbTxt = '上一次心跳在 ' + Math.round(st.hb_age) + ' 秒前——本机 dsh 已停止或被关闭，重新双击桌面启动器即可。'; }
+  else { hbTxt = '尚未收到本机心跳——请双击桌面「LLM Hub-日常开发」启动器。'; }
+  const sub2 = document.querySelector('#downPane .sub');
+  if(sub2) sub2.innerHTML = 'DeepSeek Harness 运行在<b>打开此页面的电脑</b>上（http://127.0.0.1:' + port + '），模型出口走云端 hub.zeroxcore.tech。' + hbTxt + '<br>由于浏览器的跨站会话安全策略，从云端页面点击无法直接替你完成本机 dsh 的登录——平时双击桌面「LLM Hub-日常开发」启动器会直接打开已登录的 dsh；需要从面板进入时，用下方按钮复制地址，粘贴到新标签页<b>地址栏</b>打开即可。';
+  const btn = $('#btnStart');
+  btn.style.display = 'inline-block';
+  btn.disabled = false;
+  btn.textContent = STATE.running ? '复制本机 dsh 地址' : '本机 dsh 未运行（请先运行桌面启动器）';
+  btn.onclick = function(){
+    if(STATE.running){
+      const sayOk = function(){ toast('已复制——请在新标签页地址栏粘贴打开本机 dsh'); };
+      const sayManual = function(){ window.prompt('浏览器拒绝了自动复制，请手动复制下面的地址，粘贴到新标签页打开：', STATE.url); };
+      if(navigator.clipboard && navigator.clipboard.writeText){
+        navigator.clipboard.writeText(STATE.url).then(sayOk).catch(sayManual);
+      }else{ sayManual(); }
+    }else{
+      toast('本机 dsh 未运行：请双击桌面「LLM Hub-日常开发」启动器', true);
+    }
+  };
+}
+
+refresh();
+setInterval(refresh, 10000);
+</script>
+</body>
+</html>

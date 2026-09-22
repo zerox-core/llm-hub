@@ -1,0 +1,7 @@
+FROM python:3.11-slim
+RUN pip install --no-cache-dir fastapi uvicorn httpx pyyaml pydantic
+WORKDIR /app
+COPY server.py /app/server.py
+COPY static /app/static
+EXPOSE 8787
+CMD ["python", "server.py"]

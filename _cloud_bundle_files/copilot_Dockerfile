@@ -1,0 +1,5 @@
+FROM node:20-slim
+WORKDIR /app
+RUN npm install copilot-api@0.7.0 --no-fund --no-audit
+EXPOSE 4141
+CMD ["node", "node_modules/copilot-api/dist/main.js", "start"]

@@ -1,0 +1,61 @@
+name: llm-hub
+services:
+  hub:
+    build: ./hub
+    container_name: llm-hub
+    environment:
+      HUB_CLOUD: "1"
+      CLIPROXY_BASE: http://cliproxy:8317
+      COPILOT_BASE: http://copilot-api:4141
+      HUB_PUBLIC_BASE: https://hub.zeroxcore.tech/v1
+      HUB_EGRESS_PROXY: http://mihomo:7890
+      AG_AUTH_DIR: /root/.cli-proxy-api
+      HUB_DATA_FILE: /data/data.json
+      DSH_EMBED_BASE: https://dsh.zeroxcore.tech
+      HUB_LOG_FILE: /data/logs.jsonl
+      TZ: Asia/Shanghai
+    volumes:
+      - ./data:/data
+      - ./cliproxy/auth:/root/.cli-proxy-api:ro
+    ports:
+      - "127.0.0.1:8787:8787"
+    depends_on:
+      - cliproxy
+      - copilot-api
+    mem_limit: 256m
+    restart: unless-stopped
+    networks: [llmnet]
+
+  cliproxy:
+    build: ./cliproxy
+    container_name: llm-cliproxy
+    mem_limit: 256m
+    volumes:
+      - ./cliproxy/auth:/root/.cli-proxy-api
+    restart: unless-stopped
+    networks: [llmnet]
+
+  copilot-api:
+    build: ./copilot
+    container_name: llm-copilot
+    environment:
+      HTTPS_PROXY: http://mihomo:7890
+      HTTP_PROXY: http://mihomo:7890
+    volumes:
+      - ./copilot/token:/root/.local/share/copilot-api
+    mem_limit: 192m
+    restart: unless-stopped
+    networks: [llmnet]
+
+  mihomo:
+    image: metacubex/mihomo:latest
+    container_name: llm-mihomo
+    volumes:
+      - ./mihomo/config.yaml:/root/.config/mihomo/config.yaml:ro
+    mem_limit: 128m
+    restart: unless-stopped
+    networks: [llmnet]
+
+networks:
+  llmnet:
+    driver: bridge
