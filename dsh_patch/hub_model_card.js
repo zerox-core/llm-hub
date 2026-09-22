@@ -5,7 +5,8 @@
   if (window.__hubModelCard) { return; }
   window.__hubModelCard = true;
 
-  var HUB = 'http://127.0.0.1:8787';
+  var HUB = 'https://hub.zeroxcore.tech';
+  var HUB_HEADERS = { Authorization: 'Basic ' + btoa('hubadmin:f844c52d260ac865') };
   var FALLBACK_AFTER = (typeof window.__hubMcFallbackAfter === 'number') ? window.__hubMcFallbackAfter : 20;
   var state = { model: 'auto', options: [], loaded: false };
   var root = null, btn = null, labelEl = null, panel = null, toastTimer = null;
@@ -81,7 +82,7 @@
   }
 
   function loadModel() {
-    return fetch(HUB + '/api/harness/model', { method: 'GET' })
+    return fetch(HUB + '/api/harness/model', { method: 'GET', headers: HUB_HEADERS })
       .then(function (r) { return r.json(); })
       .then(function (j) {
         state.model = j.model || 'auto';
@@ -98,7 +99,7 @@
   function pick(m) {
     fetch(HUB + '/api/harness/model', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', Authorization: HUB_HEADERS.Authorization },
       body: JSON.stringify({ model: m })
     })
       .then(function (r) { return r.json(); })

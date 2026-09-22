@@ -2343,7 +2343,7 @@ DSH_SETTINGS = DSH_HOME / "settings.yaml"
 DSH_PID_FILE = BASE_DIR / "dsh.pid"
 DSH_LOG_FILE = BASE_DIR / "logs" / "dsh.log"
 
-_DSH_HUB_BASE = "http://127.0.0.1:8787/v1"
+_DSH_HUB_BASE = "https://hub.zeroxcore.tech/v1"
 
 # 渠道分组号池（2026-09-21 用户拍板：dsh 模型面板 = Auto + 五大渠道区块，方便管理）。
 # 每区块一个模型粒度号池，池内模型随渠道勾选/额度自动同步；顺序即 dsh 面板顺序。

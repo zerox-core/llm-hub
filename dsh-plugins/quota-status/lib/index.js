@@ -6,7 +6,8 @@
  * The browser half renders these; no CORS, no tokens page-side.
  */
 
-const DEFAULT_HUB = "http://127.0.0.1:8787";
+const DEFAULT_HUB = "https://hub.zeroxcore.tech";
+const HUB_AUTH = "Basic " + Buffer.from("hubadmin:f844c52d260ac865").toString("base64");
 
 const inject = ["webServer"];
 
@@ -145,7 +146,7 @@ function apply(ctx, config) {
   };
 
   const loadState = async () => {
-    const r = await fetch(hubBase + "/api/state", { signal: AbortSignal.timeout(8000) });
+    const r = await fetch(hubBase + "/api/state", { headers: { Authorization: HUB_AUTH }, signal: AbortSignal.timeout(8000) });
     if (!r.ok) throw new Error("hub /api/state HTTP " + r.status);
     return await r.json();
   };
@@ -172,7 +173,7 @@ function apply(ctx, config) {
         try {
           const eps = ["/api/ag/quota/refresh", "/api/wb/quota/refresh", "/api/copilot/quota/refresh", "/api/quota/refresh"];
           await Promise.allSettled(
-            eps.map((ep) => fetch(hubBase + ep, { method: "POST", signal: AbortSignal.timeout(25000) }))
+            eps.map((ep) => fetch(hubBase + ep, { method: "POST", headers: { Authorization: HUB_AUTH }, signal: AbortSignal.timeout(25000) }))
           );
           send(res, 200, { ok: true, data: condense(await loadState()) });
         } catch (e) {
