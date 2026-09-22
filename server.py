@@ -2514,6 +2514,9 @@ def _dsh_settings_refresh(d):
 
 def _dsh_sync_pools(d):
     """号池/渠道结构变更后调用：重写 settings.yaml；dsh 在运行则重启注入新号池 key。"""
+    if os.environ.get("HUB_NO_DSH"):
+        return {"ok": False, "skipped": True, "restarted": False,
+                "message": "测试版通道不对接 dsh（dsh 固定走云端 https://hub.zeroxcore.tech）"}
     try:
         _dsh_render_settings(d)
     except Exception as e:
@@ -2579,6 +2582,9 @@ def _dsh_status():
 
 
 def _dsh_start():
+    if os.environ.get("HUB_NO_DSH"):
+        return {"ok": False, "skipped": True,
+                "message": "测试版通道不对接 dsh（dsh 固定走云端 https://hub.zeroxcore.tech）"}
     if _dsh_http_up():
         return {"ok": True, "started": False, "message": "已在运行"}
     d = load_data()
@@ -2984,7 +2990,7 @@ if __name__ == "__main__":
     threading.Thread(target=_autostart_harness_worker, daemon=True).start()
     threading.Thread(target=_autostart_copilot_worker, daemon=True).start()
     try:
-        uvicorn.run(app, host="0.0.0.0", port=8787, log_level="warning")
+        uvicorn.run(app, host=os.environ.get("HUB_BIND_HOST") or "0.0.0.0", port=8787, log_level="warning")
     except OSError as e:
         print("启动失败：%r" % e)
         sys.exit(1)

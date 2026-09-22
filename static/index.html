@@ -816,7 +816,7 @@ async function syncDsh(){
   toast('正在按号池分组重建 dsh 配置…');
   try{
     const r = await api('/api/harness/dsh-sync','POST',{});
-    toast(r.restarted ? 'dsh 分组已重建，dsh 已重启' : 'dsh 分组已重建（dsh 未在运行，下次启动生效）');
+    toast(r.message || (r.restarted ? 'dsh 分组已重建，dsh 已重启' : 'dsh 分组已重建（dsh 未在运行，下次启动生效）'));
   }catch(e){ toast('同步失败：'+e.message, true); }
 }
 
