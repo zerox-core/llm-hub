@@ -2571,11 +2571,46 @@ def _dsh_pid_by_port():
     return None
 
 
+# ---------------- 本机 dsh 心跳（云端面板连通性检测，启动器每 30s 上报） ----------------
+_DSH_HB = {"ts": 0.0, "token": "", "port": 0}
+_DSH_HB_TTL = 90.0
+
+
+class DshHeartbeatIn(BaseModel):
+    token: str = ""
+    port: int = DSH_PORT
+
+
+@app.post("/v1/harness/heartbeat")
+def dsh_heartbeat(inp: DshHeartbeatIn, req: Request):
+    """本机启动器上报 dsh 活性；云端面板据心跳新鲜度判定运行状态。"""
+    d = load_data()
+    _require_hub_key(d, req)
+    _DSH_HB["ts"] = time.time()
+    _DSH_HB["token"] = (inp.token or "")[:128]
+    _DSH_HB["port"] = int(inp.port or DSH_PORT)
+    return {"ok": True, "ttl": _DSH_HB_TTL}
+
+
 def _dsh_status():
+    if os.environ.get("HUB_CLOUD"):
+        hb_age = (time.time() - _DSH_HB["ts"]) if _DSH_HB["ts"] else None
+        fresh = hb_age is not None and hb_age <= _DSH_HB_TTL
+        port = _DSH_HB["port"] or DSH_PORT
+        url = ("http://127.0.0.1:%d/?token=%s" % (port, _DSH_HB["token"])) if _DSH_HB["token"] else ("http://127.0.0.1:%d/" % port)
+        return {
+            "running": fresh,
+            "port": port,
+            "cloud_mode": True,
+            "hb_age": round(hb_age, 1) if hb_age is not None else None,
+            "url": url,
+            "settings_ok": False,
+            "settings_path": "",
+        }
     return {
         "running": _dsh_http_up(),
         "port": DSH_PORT,
-        "cloud_mode": bool(os.environ.get("HUB_CLOUD")),
+        "cloud_mode": False,
         "url": _dsh_token_url(),
         "settings_ok": DSH_SETTINGS.exists(),
         "settings_path": str(DSH_SETTINGS),
