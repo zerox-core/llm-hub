@@ -2575,6 +2575,7 @@ def _dsh_status():
     return {
         "running": _dsh_http_up(),
         "port": DSH_PORT,
+        "cloud_mode": bool(os.environ.get("HUB_CLOUD")),
         "url": _dsh_token_url(),
         "settings_ok": DSH_SETTINGS.exists(),
         "settings_path": str(DSH_SETTINGS),
@@ -2688,19 +2689,29 @@ def api_harness_status():
     return _dsh_status()
 
 
+def _cloud_local_dsh_denied(action):
+    return {"ok": False, "message": "云端面板不能" + action + "你本机的 dsh——请在这台电脑上双击桌面「LLM Hub-日常开发」启动器"}
+
+
 @app.post("/api/harness/start")
 def api_harness_start():
+    if os.environ.get("HUB_CLOUD"):
+        return _cloud_local_dsh_denied("启动")
     return _dsh_start()
 
 
 @app.post("/api/harness/stop")
 def api_harness_stop():
+    if os.environ.get("HUB_CLOUD"):
+        return _cloud_local_dsh_denied("停止")
     return _dsh_stop()
 
 
 @app.post("/api/harness/dsh-sync")
 def api_harness_dsh_sync():
     """按号池分组重建 dsh settings.yaml（顶部全池 + 每号池一组）；dsh 在跑则重启注入 key。"""
+    if os.environ.get("HUB_CLOUD"):
+        return _cloud_local_dsh_denied("同步")
     return _dsh_sync_pools(load_data())
 
 

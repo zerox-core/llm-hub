@@ -14,7 +14,7 @@
     <a href="/"><span class="ico">▦</span>渠道管理</a>
     <a href="/monitor"><span class="ico">≡</span>调用监控</a>
   </nav>
-  <div class="side-foot">仅监听本机回环<br>http://127.0.0.1:8787</div>
+  <div class="side-foot" id="sideFoot">仅监听本机回环<br>http://127.0.0.1:8787</div>
 </aside>
 <button class="side-expand" data-side-toggle title="展开侧栏">☰</button>
 <div class="main">
@@ -38,7 +38,7 @@
 
 <script src="/static/hub.js?v=6"></script>
 <script>
-let STATE = {running: false, url: 'http://127.0.0.1:3080/'};
+let STATE = {running: false, url: 'http://127.0.0.1:3080/', cloud: false, port: 3080};
 const $ = s => document.querySelector(s);
 
 function toast(msg, isErr){
@@ -62,6 +62,7 @@ async function api(path, method, body){
 }
 
 function render(st){
+  if(st.cloud_mode || STATE.cloud){ STATE.cloud = true; STATE.port = st.port || STATE.port; renderCloud(); return; }
   STATE.running = !!st.running;
   STATE.url = st.url || STATE.url;
   $('#stDot').className = 'dot ' + (st.running ? 'ok' : 'bad');
@@ -85,7 +86,17 @@ function render(st){
 
 async function refresh(){
   try{
-    render(await api('/api/harness/status'));
+    const st = await api('/api/harness/status');
+    if(st.cloud_mode){
+      STATE.cloud = true;
+      STATE.port = st.port || 3080;
+      const m = location.hash.match(/dsh-token=([A-Za-z0-9_-]+)/);
+      if(m){ try{ localStorage.setItem('dshToken', m[1]); }catch(e2){} try{ history.replaceState(null, '', location.pathname); }catch(e3){} }
+      let tok = ''; try{ tok = localStorage.getItem('dshToken') || ''; }catch(e4){}
+      STATE.url = 'http://127.0.0.1:' + STATE.port + '/' + (tok ? '?token=' + tok : '');
+      await probeLocal();
+    }
+    render(st);
   }catch(e){
     $('#stChip').textContent = 'Hub 接口异常';
     $('#stChip').className = 'chip bad';
@@ -116,6 +127,36 @@ async function stopDsh(){
   }
   $('#btnStop').disabled = false;
   await refresh();
+}
+
+// ---- 云端面板模式：dsh 跑在浏览者本机，服务器探不到、也启停不了 ----
+async function probeLocal(){
+  const ctl = new AbortController();
+  const tm = setTimeout(()=>ctl.abort(), 2500);
+  try{
+    await fetch('http://127.0.0.1:' + STATE.port + '/', {mode:'no-cors', signal: ctl.signal});
+    STATE.running = true;
+  }catch(e){
+    STATE.running = false;
+  }finally{ clearTimeout(tm); }
+}
+
+function renderCloud(){
+  const port = STATE.port;
+  $('#sideFoot').innerHTML = '云端面板 · dsh 在本机<br>http://127.0.0.1:' + port;
+  $('#stDot').className = 'dot ' + (STATE.running ? 'ok' : 'bad');
+  $('#stChip').textContent = STATE.running ? '本机运行中' : '本机未检测到';
+  $('#stChip').className = 'chip ' + (STATE.running ? 'ok' : 'bad');
+  $('#dshFrame').style.display = 'none';
+  $('#downPane').style.display = 'flex';
+  $('#frameTools').style.display = 'none';
+  const sub2 = document.querySelector('#downPane .sub');
+  if(sub2) sub2.innerHTML = 'DeepSeek Harness 运行在<b>打开此页面的电脑</b>上（http://127.0.0.1:' + port + '），模型出口走云端 hub.zeroxcore.tech。由于 dsh 的跨站会话策略，云端面板不能内嵌它——请用下方按钮在新标签页打开。<br>没有运行的话，双击桌面「LLM Hub-日常开发」启动器，它会自动带登录令牌打开本页。若本机已在运行但这里显示未检测到，多半是浏览器本地网络保护拦了探测，直接点按钮即可。';
+  const btn = $('#btnStart');
+  btn.style.display = 'inline-block';
+  btn.disabled = false;
+  btn.textContent = STATE.running ? '↗ 在新标签页打开本机 dsh' : '尝试打开本机 dsh（未检测到运行）';
+  btn.onclick = function(){ window.open(STATE.url, '_blank', 'noopener'); };
 }
 
 refresh();
