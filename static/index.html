@@ -21,7 +21,7 @@
 <div class="main">
 <div class="wrap">
   <div class="topbar">
-    <div class="title">渠道管理<small>渠道总览 · 单渠道管理 · 调用地址开关（本机/公网）</small></div>
+    <div class="title">渠道管理<small>渠道总览 · 单渠道管理 · 接入地址固定</small></div>
     <div class="actions">
       <span id="quotaChip" class="chip">百炼额度：未同步</span>
       <span id="hubUrlChip" class="chip" style="cursor:pointer" title="Hub 统一入口 URL（OpenAI 兼容 /v1），点击复制" onclick="copyHubUrl()">URL：…</span>
@@ -504,7 +504,7 @@ function renderProvider(p, forceOpen){
       '<button class="small" title="取消勾选本渠道全部模型（退出可调列表与轮询）" onclick="bulkEnable(\''+p.id+'\', false)">全不选</button>' +
       '<button class="small" onclick="testModel(\''+p.id+'\',\''+esc(p.active_model||'')+'\')">测试当前模型</button>' +
       '<button class="small" onclick="copyJoin(\''+p.id+'\',\''+esc(p.active_model||'')+'\')">复制当前三件套</button>' +
-      '<button class="small" title="BASE_URL=http://127.0.0.1:8787/v1，MODEL=auto，由 Hub 按排序自动轮询免费额度模型" onclick="copyHub(\''+p.id+'\')">复制轮询三件套</button>' +
+      '<button class="small" title="BASE_URL=面板固定接入地址，MODEL=auto，由 Hub 按排序自动轮询免费额度模型" onclick="copyHub(\''+p.id+'\')">复制轮询三件套</button>' +
       '<button class="small danger" title="删除：免费额度已过期/已用尽 + 测试失败的模型" onclick="cleanup(\''+p.id+'\')">清理失效模型</button>' +
       '<button class="small danger" onclick="delProvider(\''+p.id+'\',\''+esc(p.name)+'\')">删除渠道</button>' +
       paidBox + freeOnlyBox + hiddenHint +
@@ -531,6 +531,11 @@ function backToOverview(){ VIEW = {name:'overview', pid:null}; saveView(); rende
 function effUrl(base){
   try{
     const u = new URL(base);
+    if(STATE.public_base){
+      const pb = new URL(STATE.public_base);
+      const path = (u.pathname && u.pathname !== '/') ? u.pathname : '';
+      return pb.protocol + '//' + pb.host + path + u.search;
+    }
     if(u.hostname !== '127.0.0.1' && u.hostname !== 'localhost') return base;
     const cc = STATE.call_config || {mode:'lan', public_host:''};
     let host = null;
@@ -613,8 +618,8 @@ function renderSide(){
   if(no) no.className = VIEW.name==='overview' ? 'on' : '';
   const sf = $('#sideFoot');
   if(sf){
-    let t = '本机 http://127.0.0.1:8787';
-    if(STATE.lan_ip && STATE.lan_ip !== '127.0.0.1') t += '<br>局域网 http://'+esc(STATE.lan_ip)+':8787';
+    let t = STATE.public_base ? ('接入地址 '+esc(STATE.public_base)) : '本机 http://127.0.0.1:8787';
+    if(!STATE.public_base && STATE.lan_ip && STATE.lan_ip !== '127.0.0.1') t += '<br>局域网 http://'+esc(STATE.lan_ip)+':8787';
     sf.innerHTML = t;
   }
 }
@@ -623,53 +628,42 @@ function renderSide(){
 function renderCfg(){
   const el = $('#cfgPanel');
   if(!el) return;
-  const cc = STATE.call_config || {mode:'lan', public_host:''};
   const hub = effUrl(STATE.hub_base || 'http://127.0.0.1:8787/v1');
-  let urls = '<div class="cfg-url"><span class="nm">Hub 统一入口（自动轮询全部渠道）</span><code>'+esc(hub)+'</code><button class="small" onclick="cp(\''+esc(hub)+'\')">复制</button></div>';
+  let urls = '<div class="cfg-url"><span class="nm">Hub 统一入口（固定地址 · 自动轮询全部渠道）</span><code>'+esc(hub)+'</code><button class="small" onclick="cp(\''+esc(hub)+'\')">复制</button></div>';
   (STATE.providers || []).forEach(p => {
     const eu = effUrl(p.base_url);
     urls += '<div class="cfg-url"><span class="nm">'+esc(p.name)+'</span><code>'+esc(eu)+'</code><button class="small" onclick="cp(\''+esc(eu)+'\')">复制</button></div>';
   });
   el.innerHTML =
-    '<div class="cfg-head"><b>调用配置</b>' +
-      '<div class="seg">' +
-        '<button class="'+(cc.mode!=='public'?'on':'')+'" onclick="setCallMode(\'lan\')">本机（局域网）</button>' +
-        '<button class="'+(cc.mode==='public'?'on':'')+'" onclick="setCallMode(\'public\')">公网</button>' +
-      '</div>' +
-      '<span class="cfg-host">公网地址 <input id="cfgHost" placeholder="如 llm.example.com 或 1.2.3.4（可带 https://）" value="'+esc(cc.public_host||'')+'"><button class="small primary" onclick="saveCallHost()">保存地址</button></span>' +
-    '</div>' +
-    '<div class="cfg-urls">'+urls+'</div>' +
-    '<div class="quota-line"><span class="q-num">' + (cc.mode==='public'
-      ? '公网模式：本机地址已切换为你配置的公网地址（未配置时回退局域网 IP）；远程 API 地址不受影响。'
-      : '本机模式：本机地址显示为局域网 IP，同网段设备可直接调用；远程 API 地址不受影响。') + '</span></div>';
+    '<div class="cfg-head"><b>调用配置</b><span class="q-num">接入地址已固定，面板不再提供修改入口</span></div>' +
+    '<div class="cfg-urls">'+urls+'</div>';
 }
-async function setCallMode(mode){
+
+// ---------------- 接入密钥管理（重置防泄露 + 创建新 key） ----------------
+async function createKey(){
+  const name = prompt('新 key 名称（可留空自动编号）：', '');
+  if(name === null) return;
   try{
-    const r = await api('/api/call-config', 'POST', {mode: mode, public_host: (STATE.call_config||{}).public_host || ''});
-    if(r.ok) toast(mode==='public' ? '已切换为公网调用地址' : '已切换为本机（局域网）调用地址');
-    else toast('切换失败：'+(r.error||''), true);
-  }catch(e){ toast('切换失败：'+e.message, true); }
-  await load();
+    const r = await api('/api/keys', 'POST', {name: name.trim()});
+    toast('已创建 key「'+r.name+'」，立即可调用 /v1');
+    await load();
+  }catch(e){ toast('创建失败：'+e.message, true); }
 }
-async function saveCallHost(){
+async function resetKey(id){
+  if(!confirm('重置该 key？旧 key 立即失效（防泄露），使用它的客户端需换新 key。')) return;
   try{
-    const v = (($('#cfgHost')||{}).value || '').trim();
-    const old = ((STATE.call_config||{}).public_host || '');
-    let clear = false;
-    if(v === old){ toast('公网地址未变化，无需保存'); return; }
-    if(!v && old){
-      // 二次确认防误触：清空已保存地址必须用户明确确认
-      if(!confirm('输入框为空。确定要清除已保存的公网地址「' + old + '」吗？\n点「取消」保留原地址。')){
-        $('#cfgHost').value = old;
-        return;
-      }
-      clear = true;
-    }
-    const r = await api('/api/call-config', 'POST', {mode: (STATE.call_config||{}).mode || 'lan', public_host: v, clear_public_host: clear});
-    if(r.ok) toast(clear ? '公网地址已清除' : '公网地址已保存');
-    else toast('保存失败：'+(r.error||''), true);
-  }catch(e){ toast('保存失败：'+e.message, true); }
-  await load();
+    await api('/api/keys/'+id+'/reset', 'POST', {});
+    toast('key 已重置，旧 key 已失效');
+    await load();
+  }catch(e){ toast('重置失败：'+e.message, true); }
+}
+async function delKey(id){
+  if(!confirm('删除该 key？使用它的客户端将立即无法调用。')) return;
+  try{
+    await api('/api/keys/'+id, 'DELETE');
+    toast('key 已删除');
+    await load();
+  }catch(e){ toast('删除失败：'+e.message, true); }
 }
 
 // ---------------- 总览：统计磁贴行 ----------------
@@ -763,7 +757,22 @@ function renderPoolPanel(){
   if(!el) return;
   const ps = STATE.providers || [];
   const eu = effUrl(STATE.hub_base || 'http://127.0.0.1:8787/v1');
-  let h = '<div class="pp-head">全部号池共用 · dsh 分组「Hub · 全部号池」（auto = 跨全部号池大轮询）</div>';
+  const eu0 = effUrl(STATE.hub_base || 'http://127.0.0.1:8787/v1');
+  let h = '<div class="pp-head">接入密钥 · 固定地址 <code>'+esc(eu0)+'</code> · 任一 key 均可调用 /v1</div>';
+  h += '<div class="pp-row"><span class="pp-name">主 key</span><code class="pp-key">'+esc(maskKey(STATE.hub_key))+'</code>'
+     + '<button class="small" onclick="cp(\''+esc(STATE.hub_key||'')+'\')">复制</button>'
+     + '<span class="q-num">dsh 与既有客户端在用，更换需走 dsh 同步</span></div>';
+  for(const k of (STATE.hub_keys||[])){
+    h += '<div class="pp-row"><span class="pp-name">'+esc(k.name)+'</span>'
+       + '<code class="pp-key">'+esc(maskKey(k.key))+'</code>'
+       + '<button class="small" onclick="cp(\''+esc(k.key)+'\')">复制</button>'
+       + '<button class="small" onclick="resetKey(\''+esc(k.id)+'\')">重置</button>'
+       + '<button class="small" onclick="delKey(\''+esc(k.id)+'\')">删除</button>'
+       + '<span class="q-num">建 '+esc(k.created_at||'')+'</span></div>';
+  }
+  h += '<div class="pp-ops"><button class="small" onclick="createKey()">＋ 创建 key</button>'
+     + '<span class="q-num">key 疑似泄露点「重置」立即换新；接入地址固定不可改</span></div>';
+  h += '<div class="pp-head">全部号池共用 · dsh 分组「Hub · 全部号池」（auto = 跨全部号池大轮询）</div>';
   h += '<div class="pp-row"><span class="pp-name">key</span><code class="pp-key">'+esc(maskKey(STATE.hub_key))+'</code>'
      + '<button class="small" onclick="cp(\''+esc(STATE.hub_key||'')+'\')">复制</button>'
      + '<span class="pp-name">URL</span><code>'+esc(eu)+'</code>'

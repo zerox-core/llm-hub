@@ -38,6 +38,8 @@ STATIC_DIR = BASE_DIR / "static"
 LOG_FILE = BASE_DIR / "logs.jsonl"
 
 HUB_BASE = "http://127.0.0.1:8787/v1"
+# 固定公网接入地址：云端部署由环境变量注入，面板展示/复制的对外地址一律用它；为空回退本地地址
+PUBLIC_BASE = (os.environ.get("HUB_PUBLIC_BASE") or "").rstrip("/")
 
 _lock = threading.Lock()
 
@@ -255,7 +257,7 @@ def quota_state(d, model):
 # ---------------- Antigravity 额度（按组共享：5 小时 + 每周） ----------------
 # 官方口径：同一组内所有模型共享一个 5 小时额度 + 一个每周额度。
 # 已核实分组：gemini-* → Gemini 组；claude-* / gpt-* → Claude and GPT 组。
-AG_AUTH_DIR = os.path.expanduser(os.path.join("~", ".cli-proxy-api"))
+AG_AUTH_DIR = os.environ.get("AG_AUTH_DIR") or os.path.expanduser(os.path.join("~", ".cli-proxy-api"))
 AG_QUOTA_HOSTS = [
     "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
     "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
@@ -321,6 +323,21 @@ def ag_auth_files():
     return out
 
 
+AG_EGRESS_PROXY = os.environ.get("HUB_EGRESS_PROXY") or ""
+
+
+def _ag_http_post(host, json_body, headers):
+    """AG 额度查询出口：云端部署经 mihomo 容器代理访问 Google，本地直连。"""
+    if AG_EGRESS_PROXY:
+        try:
+            with httpx.Client(proxy=AG_EGRESS_PROXY, verify=False, timeout=20) as c:
+                return c.post(host, json=json_body, headers=headers)
+        except TypeError:  # 旧版 httpx 用 proxies=
+            with httpx.Client(proxies=AG_EGRESS_PROXY, verify=False, timeout=20) as c:
+                return c.post(host, json=json_body, headers=headers)
+    return httpx.post(host, json=json_body, headers=headers, timeout=20, verify=False)
+
+
 def fetch_ag_quota(d):
     """逐个本地 AG 凭证查询额度摘要（该接口不消耗对话额度）。返回 accounts 列表。"""
     prev_groups = ((d.get("ag_quota") or {}).get("groups") or {})
@@ -336,9 +353,8 @@ def fetch_ag_quota(d):
         body, err = None, ""
         for host in AG_QUOTA_HOSTS:
             try:
-                r = httpx.post(host, json={}, headers={"Authorization": "Bearer " + tok,
-                                                       "User-Agent": AG_UA},
-                               timeout=20, verify=False)
+                r = _ag_http_post(host, {}, {"Authorization": "Bearer " + tok,
+                                              "User-Agent": AG_UA})
                 if r.status_code == 200:
                     body = r.json()
                     break
@@ -727,6 +743,8 @@ def state():
         "wb_quota": d.get("wb_quota") or {"accounts": [], "rates": {}, "synced_at": ""},
         "bl_installed": bool(bl),
         "hub_base": HUB_BASE,
+        "public_base": PUBLIC_BASE,
+        "hub_keys": d.get("hub_keys") or [],
         "hub_key": get_hub_key(d),
         "pools": _pool_view(d),
         "harness_model": d.get("harness_model") or "auto",
@@ -1719,6 +1737,9 @@ def _require_hub_key(d, req):
     key = auth[7:].strip() if auth.startswith("Bearer ") else ""
     if key and key == get_hub_key(d):
         return None
+    for hk in d.get("hub_keys") or []:
+        if hk.get("key") and key == hk["key"]:
+            return None
     if key:
         for pl in d.get("pools") or []:
             if pl.get("key") and key == pl["key"]:
@@ -1962,6 +1983,9 @@ def _require_hub_key_anth(d, req):
     key = auth[7:].strip() if auth.startswith("Bearer ") else xkey.strip()
     if key and key == get_hub_key(d):
         return None
+    for hk in d.get("hub_keys") or []:
+        if hk.get("key") and key == hk["key"]:
+            return None
     if key:
         for pl in d.get("pools") or []:
             if pl.get("key") and key == pl["key"]:
@@ -2852,30 +2876,47 @@ def _lan_ip():
     return ip
 
 
-@app.post("/api/call-config")
-async def api_call_config(req: Request):
-    """调用地址总开关：mode=lan（本机/局域网）/ public（公网），public_host 为公网地址"""
-    body = await req.json()
+# ---------------- 接入密钥管理（地址固定后，key 是唯一可变凭证） ----------------
+class KeyIn(BaseModel):
+    name: str = ""
+
+
+@app.post("/api/keys")
+def create_hub_key(inp: KeyIn):
+    """创建一个新接入 key：与主 key 同为全池权限，可随时重置（防泄露）/删除。"""
     d = load_data()
-    cc = d.get("call_config") or {}
-    cc.setdefault("mode", "lan")
-    cc.setdefault("public_host", "")
-    if "mode" in body:
-        m = str(body.get("mode") or "")
-        if m not in ("lan", "public"):
-            raise HTTPException(400, "mode 只能是 lan / public")
-        cc["mode"] = m
-    if "public_host" in body:
-        v = str(body.get("public_host") or "").strip().rstrip("/")
-        if not v and cc.get("public_host") and not body.get("clear_public_host"):
-            # 防误触（2026-09-21 用户拍板）：空值不清除已保存的公网地址，
-            # 需前端二次确认后带 clear_public_host=true 才会清空。
-            pass
-        else:
-            cc["public_host"] = v
-    d["call_config"] = cc
+    ks = d.setdefault("hub_keys", [])
+    k = {"id": uuid.uuid4().hex[:8],
+         "name": (inp.name or "").strip() or ("key-" + str(len(ks) + 1)),
+         "key": "hub-" + secrets.token_urlsafe(18),
+         "created_at": time.strftime("%Y-%m-%d %H:%M:%S")}
+    ks.append(k)
     save_data(d)
-    return {"ok": True, "call_config": cc, "lan_ip": _lan_ip()}
+    return k
+
+
+@app.post("/api/keys/{kid}/reset")
+def reset_hub_key(kid: str):
+    """重置接入 key：旧 key 立即失效，新 key 立即可用。"""
+    d = load_data()
+    for k in d.get("hub_keys") or []:
+        if k.get("id") == kid:
+            k["key"] = "hub-" + secrets.token_urlsafe(18)
+            save_data(d)
+            return {"ok": True, "key": k["key"]}
+    raise HTTPException(404, "key 不存在")
+
+
+@app.delete("/api/keys/{kid}")
+def delete_hub_key(kid: str):
+    d = load_data()
+    ks = d.get("hub_keys") or []
+    rest = [k for k in ks if k.get("id") != kid]
+    if len(rest) == len(ks):
+        raise HTTPException(404, "key 不存在")
+    d["hub_keys"] = rest
+    save_data(d)
+    return {"ok": True}
 
 
 def _autostart_copilot_worker():
