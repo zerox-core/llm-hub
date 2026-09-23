@@ -1,0 +1,12 @@
+{
+  "name": "@dsh-local/remote-agent",
+  "version": "0.1.0",
+  "description": "Same-origin service-control and report API for the mobile RemoteConsole page (whitelist-only service start/stop + report tail).",
+  "type": "module",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  }
+}

@@ -9,6 +9,13 @@
       后端文件夹；侧栏里每个分区显示为一条会话样式行——主文案 = 其内会话标题，
       右侧小字 = 分区时间（MM-DD HH:mm）；分区的子级会话行隐藏，点分区行直接
       进入会话。工作区选择菜单里的机器名同样替换为「会话 MM-DD HH:mm」。
+   5) Codex 风格（2026-09-23 R24 拍板）：面板里不再暴露文件夹体系——
+      a) 侧栏「工作区」原生分区头隐藏；
+      b) 非会话区（项目）工作区文件夹行及其子会话行整体隐藏；
+      c) 会话区行的文件夹图标隐藏（只留会话标题 + 时间）；
+      d) 主面板（hero/会话页）里的工作区选择 chip 隐藏，新会话直达消息输入框。
+      会话标题 = 首条发送内容（由 cordis.patch.yml 摘掉 LLM 标题提供方后，
+      dsh 原生确定性回退自动取首条消息开头若干字）。
    命名规则：YYYY.MMDD-HH.mm，同分钟冲突自动 (1) (2) 后缀（服务端处理）。
    无外部依赖；SPA 重渲染自动重挂（tick 模式同 hub_ui_kit）。 */
 (function () {
@@ -21,6 +28,7 @@
   var bar = null, countEl = null, addBtn = null;
   var zoneTitles = [];       // 会话区工作区标题缓存
   var zoneByTitle = {};      // title -> {id, path, sessionIds, project}
+  var projectTitles = [];    // 项目工作区标题缓存（隐藏主面板工作区 chip 用）
   var fetching = false, tickN = 0, creating = false;
   var modal = null;
 
@@ -108,6 +116,14 @@
         if (countEl) { countEl.textContent = '会话区服务未就绪'; }
         if (done) { done(false); }
       });
+    fetch(API + '/projects')
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (j && j.ok) {
+          projectTitles = (j.projects || []).map(function (p) { return p.title; });
+        }
+      })
+      .catch(function () {});
   }
 
   /* ---------- 顶部栏 ---------- */
@@ -401,12 +417,14 @@
   /**
    * 把分区行重排成一条会话样式行：
    * 主文案 = 其内会话标题 + 小字分区时间；隐藏子级会话行；点分区行 = 进会话。
+   * R24：非会话区（项目）工作区行及其子会话行整体隐藏；分区行文件夹图标隐藏。
    */
   function restyleZoneRows() {
     var root = document.querySelector('.hHd-Xa_root');
     if (!root) { return; }
     var items = root.querySelectorAll('[role="treeitem"]');
     var curZone = null;
+    var inNonZone = false;
     var rows = {}, childOf = {};
     var WP = '工作区' + LQ, OP = RQ + '的操作';
     for (var i = 0; i < items.length; i++) {
@@ -415,14 +433,34 @@
       if (op) {
         var al = op.getAttribute('aria-label') || '';
         var t = al.substring(WP.length, al.length - OP.length);
-        curZone = isZoneTitle(t) ? t : null;
-        if (curZone) { rows[curZone] = it; }
+        if (isZoneTitle(t)) {
+          curZone = t;
+          inNonZone = false;
+          rows[curZone] = it;
+        } else {
+          // 项目工作区文件夹行：Codex 风格下不显示
+          curZone = null;
+          inNonZone = true;
+          if (it.style.display !== 'none') { it.style.display = 'none'; }
+        }
+        continue;
+      }
+      if (inNonZone) {
+        // 项目工作区下的会话行一并隐藏
+        if (it.style.display !== 'none') { it.style.display = 'none'; }
         continue;
       }
       if (curZone && !childOf[curZone]) { childOf[curZone] = it; }
     }
     Object.keys(rows).forEach(function (t) {
       var row = rows[t], child = childOf[t];
+      // 文件夹图标隐藏（按钮内的图标保留）
+      var svgs = row.querySelectorAll('svg');
+      for (var si = 0; si < svgs.length; si++) {
+        if (!svgs[si].closest('button') && svgs[si].style.display !== 'none') {
+          svgs[si].style.display = 'none';
+        }
+      }
       var titleEl = zoneTitleEl(row, t);
       if (!titleEl) { return; }
       var nameEl = titleEl.querySelector('[data-hub-zone-name]');
@@ -452,6 +490,56 @@
         }
       }
     });
+  }
+
+  /** 侧栏「工作区」原生分区头（标签 + 搜索/排序/新建图标行）隐藏。 */
+  function hideWorkspaceHeader() {
+    var region = document.querySelector('.hHd-Xa_regionArea');
+    if (!region) { return; }
+    var nodes = region.querySelectorAll('div, span');
+    for (var i = 0; i < nodes.length; i++) {
+      var n = nodes[i];
+      if ((n.textContent || '').trim() !== '工作区') { continue; }
+      var row = n, found = false;
+      for (var up = 0; up < 5 && row.parentElement && row.parentElement !== region; up++) {
+        row = row.parentElement;
+        if (row.querySelector('button') || row.querySelector('svg')) { found = true; break; }
+      }
+      // 只在确认爬到的是「带图标的标题行」时才隐藏，避免误藏整棵树
+      if (found && row.style.display !== 'none') { row.style.display = 'none'; }
+      return;
+    }
+  }
+
+  /** 主面板（hero/会话页）里的工作区选择 chip 隐藏；侧栏与自身弹窗不动。 */
+  function hideWorkspaceChips() {
+    var names = {};
+    var i;
+    for (i = 0; i < zoneTitles.length; i++) { names[zoneTitles[i]] = 1; }
+    for (i = 0; i < projectTitles.length; i++) { names[projectTitles[i]] = 1; }
+    var all = document.querySelectorAll('span, div, button');
+    for (i = 0; i < all.length; i++) {
+      var n = all[i];
+      if (n.closest('.hHd-Xa_root') || n.closest('.hub-zone-mask') ||
+          n.closest('.hub-zone-toast') || n.closest('[role="menu"]') ||
+          n.closest('[role="listbox"]')) { continue; }
+      var t = (n.textContent || '').replace(/\s+/g, '');
+      if (!t || t.length > 30) { continue; }
+      var isWs = names[t] ||
+        /^\d{4}\.\d{4}-\d{2}\.\d{2}(\(\d+\))?$/.test(t) ||
+        /^会话\d{2}-\d{2}\d{2}:\d{2}(\(\d+\))?$/.test(t);
+      if (!isWs) { continue; }
+      // 爬到最小 chip 容器（父级文本至多再多个箭头字符）
+      var chip = n;
+      for (var up = 0; up < 4 && chip.parentElement; up++) {
+        var pt = (chip.parentElement.textContent || '').replace(/\s+/g, '');
+        if (pt.length <= t.length + 2) { chip = chip.parentElement; } else { break; }
+      }
+      if (chip !== document.body && chip !== document.documentElement &&
+          chip.style.display !== 'none') {
+        chip.style.display = 'none';
+      }
+    }
   }
 
   /** 工作区选择菜单（含新建会话的工作区选择）里的机器名替换成友好名。 */
@@ -538,6 +626,8 @@
     mountBar();
     injectZoneRowControls();
     restyleZoneRows();
+    hideWorkspaceHeader();
+    hideWorkspaceChips();
     restyleMenus();
     tickN++;
     if (tickN % 15 === 0) { refreshList(); } // 约 13s 一次后台刷新

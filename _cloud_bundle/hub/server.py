@@ -38,8 +38,13 @@ STATIC_DIR = BASE_DIR / "static"
 LOG_FILE = BASE_DIR / "logs.jsonl"
 
 HUB_BASE = "http://127.0.0.1:8787/v1"
-# 固定公网接入地址：云端部署由环境变量注入，面板展示/复制的对外地址一律用它；为空回退本地地址
-PUBLIC_BASE = (os.environ.get("HUB_PUBLIC_BASE") or "").rstrip("/")
+
+# ---- cloud mode (HUB_CLOUD=1): container orchestration, disable local process mgmt ----
+HUB_CLOUD = os.environ.get("HUB_CLOUD") == "1"
+CLIPROXY_BASE = os.environ.get("CLIPROXY_BASE", "http://127.0.0.1:8317").rstrip("/")
+COPILOT_BASE = os.environ.get("COPILOT_BASE", "http://127.0.0.1:4141").rstrip("/")
+DATA_FILE = Path(os.environ.get("HUB_DATA_FILE", str(DATA_FILE)))
+LOG_FILE = Path(os.environ.get("HUB_LOG_FILE", str(LOG_FILE)))
 
 _lock = threading.Lock()
 
@@ -257,7 +262,7 @@ def quota_state(d, model):
 # ---------------- Antigravity 额度（按组共享：5 小时 + 每周） ----------------
 # 官方口径：同一组内所有模型共享一个 5 小时额度 + 一个每周额度。
 # 已核实分组：gemini-* → Gemini 组；claude-* / gpt-* → Claude and GPT 组。
-AG_AUTH_DIR = os.environ.get("AG_AUTH_DIR") or os.path.expanduser(os.path.join("~", ".cli-proxy-api"))
+AG_AUTH_DIR = os.path.expanduser(os.path.join("~", ".cli-proxy-api"))
 AG_QUOTA_HOSTS = [
     "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
     "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
@@ -323,21 +328,6 @@ def ag_auth_files():
     return out
 
 
-AG_EGRESS_PROXY = os.environ.get("HUB_EGRESS_PROXY") or ""
-
-
-def _ag_http_post(host, json_body, headers):
-    """AG 额度查询出口：云端部署经 mihomo 容器代理访问 Google，本地直连。"""
-    if AG_EGRESS_PROXY:
-        try:
-            with httpx.Client(proxy=AG_EGRESS_PROXY, verify=False, timeout=20) as c:
-                return c.post(host, json=json_body, headers=headers)
-        except TypeError:  # 旧版 httpx 用 proxies=
-            with httpx.Client(proxies=AG_EGRESS_PROXY, verify=False, timeout=20) as c:
-                return c.post(host, json=json_body, headers=headers)
-    return httpx.post(host, json=json_body, headers=headers, timeout=20, verify=False)
-
-
 def fetch_ag_quota(d):
     """逐个本地 AG 凭证查询额度摘要（该接口不消耗对话额度）。返回 accounts 列表。"""
     prev_groups = ((d.get("ag_quota") or {}).get("groups") or {})
@@ -353,8 +343,9 @@ def fetch_ag_quota(d):
         body, err = None, ""
         for host in AG_QUOTA_HOSTS:
             try:
-                r = _ag_http_post(host, {}, {"Authorization": "Bearer " + tok,
-                                              "User-Agent": AG_UA})
+                r = httpx.post(host, json={}, headers={"Authorization": "Bearer " + tok,
+                                                       "User-Agent": AG_UA},
+                               timeout=20, verify=False)
                 if r.status_code == 200:
                     body = r.json()
                     break
@@ -682,7 +673,7 @@ app = FastAPI(title="LLM Key Hub")
 # dsh 面板注入的模型卡片从 3080 端口页面跨源调用本 API，需要 CORS 放行
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://127.0.0.1:3080", "http://localhost:3080"],
+    allow_origins=["http://127.0.0.1:3080", "http://localhost:3080", "https://zxc66.asia"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -744,13 +735,10 @@ def state():
         "wb_quota": d.get("wb_quota") or {"accounts": [], "rates": {}, "synced_at": ""},
         "bl_installed": bool(bl),
         "hub_base": HUB_BASE,
-        "public_base": PUBLIC_BASE,
-        "hub_keys": d.get("hub_keys") or [],
         "hub_key": get_hub_key(d),
         "pools": _pool_view(d),
         "harness_model": d.get("harness_model") or "auto",
         "autostart_harness": bool(d.get("autostart_harness", True)),
-        "cloud_mode": bool(os.environ.get("HUB_CLOUD")),
         "copilot_quota": d.get("copilot_quota") or {},
         "autostart_copilot": bool(d.get("autostart_copilot", True)),
         "call_config": d.get("call_config") or {"mode": "lan", "public_host": ""},
@@ -1192,6 +1180,7 @@ _bl_login = {"proc": None, "started_at": None, "log": None}
 
 @app.post("/api/bl/login")
 def bl_login_start():
+    if HUB_CLOUD: return {"ok": False, "message": "cloud mode: login locally then migrate auth files"}
     """启动 bl auth login --console：会在本机弹出浏览器，用户在浏览器里登录阿里云。"""
     bl = find_bl()
     if not bl:
@@ -1289,7 +1278,7 @@ def ag_models_count():
     """查本地反代 (127.0.0.1:8317) 的模型数；拿不到 = 未启动/未授权"""
     try:
         with httpx.Client(timeout=8.0, trust_env=False) as cli:
-            r = cli.get("http://127.0.0.1:8317/v1/models",
+            r = cli.get(CLIPROXY_BASE + "/v1/models",
                         headers={"Authorization": "Bearer " + ag_api_key()})
             if r.status_code == 200:
                 data = r.json()
@@ -1301,6 +1290,7 @@ def ag_models_count():
 
 
 def _ag_restart_proxy():
+    if HUB_CLOUD: return {"ok": False, "message": "cloud mode: proxy managed by container"}
     """杀掉旧的 cli-proxy-api 进程并重新拉起（登录完成后加载新凭证）"""
     subprocess.run("taskkill /F /IM cli-proxy-api.exe", shell=True,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -1354,6 +1344,7 @@ def ag_status():
 
 @app.post("/api/ag/login")
 def ag_login_start():
+    if HUB_CLOUD: return {"ok": False, "message": "cloud mode: login locally then migrate auth files"}
     """启动 cli-proxy-api -antigravity-login：会在本机弹出浏览器，走 Google 授权。"""
     exe = find_cliproxy()
     if not exe:
@@ -1452,7 +1443,7 @@ def ag_login_status():
 #   2) GET /get-auth-status?state=… → wait / ok / error
 # 成功后 CPA 把凭证写进 ~/.cli-proxy-api/workbuddy.json，无需重启进程。
 
-WB_MGMT_BASE = "http://127.0.0.1:8317/v0/management"
+WB_MGMT_BASE = CLIPROXY_BASE + "/v0/management"
 _wb_login = {"state": None, "url": None, "started_at": None,
              "status": None, "detail": None, "restarted": False}
 
@@ -1588,7 +1579,7 @@ def wb_models_count():
     """本地反代当前暴露的 wb 前缀模型数；拿不到 = 反代未跑或未登录"""
     try:
         with httpx.Client(timeout=8.0, trust_env=False) as cli:
-            r = cli.get("http://127.0.0.1:8317/v1/models",
+            r = cli.get(CLIPROXY_BASE + "/v1/models",
                         headers={"Authorization": "Bearer " + ag_api_key()})
             if r.status_code == 200:
                 items = r.json().get("data") or r.json().get("models") or []
@@ -1637,6 +1628,7 @@ def wb_status():
 
 @app.post("/api/wb/login")
 def wb_login_start():
+    if HUB_CLOUD: return {"ok": False, "message": "cloud mode: login locally then migrate auth files"}
     """向 CPA 管理口拿 WorkBuddy 登录链接（腾讯 CodeBuddy 登录页）。"""
     dll = CLIPROXY_DIR / "plugins" / "workbuddy.dll"
     if not dll.exists():
@@ -1739,9 +1731,6 @@ def _require_hub_key(d, req):
     key = auth[7:].strip() if auth.startswith("Bearer ") else ""
     if key and key == get_hub_key(d):
         return None
-    for hk in d.get("hub_keys") or []:
-        if hk.get("key") and key == hk["key"]:
-            return None
     if key:
         for pl in d.get("pools") or []:
             if pl.get("key") and key == pl["key"]:
@@ -1985,9 +1974,6 @@ def _require_hub_key_anth(d, req):
     key = auth[7:].strip() if auth.startswith("Bearer ") else xkey.strip()
     if key and key == get_hub_key(d):
         return None
-    for hk in d.get("hub_keys") or []:
-        if hk.get("key") and key == hk["key"]:
-            return None
     if key:
         for pl in d.get("pools") or []:
             if pl.get("key") and key == pl["key"]:
@@ -2369,7 +2355,7 @@ DSH_SETTINGS = DSH_HOME / "settings.yaml"
 DSH_PID_FILE = BASE_DIR / "dsh.pid"
 DSH_LOG_FILE = BASE_DIR / "logs" / "dsh.log"
 
-_DSH_HUB_BASE = "https://hub.zeroxcore.tech/v1"
+_DSH_HUB_BASE = "http://127.0.0.1:8787/v1"
 
 # 渠道分组号池（2026-09-21 用户拍板：dsh 模型面板 = Auto + 五大渠道区块，方便管理）。
 # 每区块一个模型粒度号池，池内模型随渠道勾选/额度自动同步；顺序即 dsh 面板顺序。
@@ -2515,9 +2501,6 @@ def _dsh_settings_refresh(d):
 
 def _dsh_sync_pools(d):
     """号池/渠道结构变更后调用：重写 settings.yaml；dsh 在运行则重启注入新号池 key。"""
-    if os.environ.get("HUB_NO_DSH"):
-        return {"ok": False, "skipped": True, "restarted": False,
-                "message": "测试版通道不对接 dsh（dsh 固定走云端 https://hub.zeroxcore.tech）"}
     try:
         _dsh_render_settings(d)
     except Exception as e:
@@ -2533,6 +2516,7 @@ def _dsh_sync_pools(d):
 
 
 def _dsh_http_up():
+    if HUB_CLOUD: return False
     try:
         r = httpx.get("http://127.0.0.1:%d/" % DSH_PORT, timeout=1.5)
         # 401 = dsh 活着且要求 token(默认鉴权),也算运行中
@@ -2572,50 +2556,10 @@ def _dsh_pid_by_port():
     return None
 
 
-# ---------------- 本机 dsh 心跳（云端面板连通性检测，启动器每 30s 上报） ----------------
-_DSH_HB = {"ts": 0.0, "token": "", "port": 0}
-_DSH_HB_TTL = 90.0
-# R7: 公网内嵌地址（ssh 反向隧道 + nginx 子域）；云端 compose 显式设置 DSH_EMBED_BASE 才启用
-DSH_EMBED_BASE = os.environ.get("DSH_EMBED_BASE", "").strip().rstrip("/")
-
-
-class DshHeartbeatIn(BaseModel):
-    token: str = ""
-    port: int = DSH_PORT
-
-
-@app.post("/v1/harness/heartbeat")
-def dsh_heartbeat(inp: DshHeartbeatIn, req: Request):
-    """本机启动器上报 dsh 活性；云端面板据心跳新鲜度判定运行状态。"""
-    d = load_data()
-    _require_hub_key(d, req)
-    _DSH_HB["ts"] = time.time()
-    _DSH_HB["token"] = (inp.token or "")[:128]
-    _DSH_HB["port"] = int(inp.port or DSH_PORT)
-    return {"ok": True, "ttl": _DSH_HB_TTL}
-
-
 def _dsh_status():
-    if os.environ.get("HUB_CLOUD"):
-        hb_age = (time.time() - _DSH_HB["ts"]) if _DSH_HB["ts"] else None
-        fresh = hb_age is not None and hb_age <= _DSH_HB_TTL
-        port = _DSH_HB["port"] or DSH_PORT
-        url = ("http://127.0.0.1:%d/?token=%s" % (port, _DSH_HB["token"])) if _DSH_HB["token"] else ("http://127.0.0.1:%d/" % port)
-        embed_url = ("%s/?token=%s" % (DSH_EMBED_BASE, _DSH_HB["token"])) if (DSH_EMBED_BASE and _DSH_HB["token"]) else ""
-        return {
-            "running": fresh,
-            "port": port,
-            "cloud_mode": True,
-            "hb_age": round(hb_age, 1) if hb_age is not None else None,
-            "url": url,
-            "embed_url": embed_url,
-            "settings_ok": False,
-            "settings_path": "",
-        }
     return {
         "running": _dsh_http_up(),
         "port": DSH_PORT,
-        "cloud_mode": False,
         "url": _dsh_token_url(),
         "settings_ok": DSH_SETTINGS.exists(),
         "settings_path": str(DSH_SETTINGS),
@@ -2623,9 +2567,7 @@ def _dsh_status():
 
 
 def _dsh_start():
-    if os.environ.get("HUB_NO_DSH"):
-        return {"ok": False, "skipped": True,
-                "message": "测试版通道不对接 dsh（dsh 固定走云端 https://hub.zeroxcore.tech）"}
+    if HUB_CLOUD: return {"ok": False, "message": "cloud mode: dsh runs locally only"}
     if _dsh_http_up():
         return {"ok": True, "started": False, "message": "已在运行"}
     d = load_data()
@@ -2669,8 +2611,7 @@ def _dsh_start():
         log_fh = open(DSH_LOG_FILE, "ab")
         try:
             proc = subprocess.Popen(
-                [node_exe, bin_js, "web", "--no-open",
-                 "--trusted-host", "dsh.zeroxcore.tech"],
+                [node_exe, bin_js, "web", "--no-open"],
                 cwd=str(BASE_DIR), env=env,
                 stdout=log_fh, stderr=subprocess.STDOUT,
                 creationflags=0x00000008 | 0x00000200)
@@ -2693,6 +2634,7 @@ def _dsh_start():
 
 
 def _dsh_stop():
+    if HUB_CLOUD: return {"ok": False, "message": "cloud mode: dsh runs locally only"}
     pid = _dsh_pid_by_port()
     if not pid:
         try:
@@ -2730,29 +2672,19 @@ def api_harness_status():
     return _dsh_status()
 
 
-def _cloud_local_dsh_denied(action):
-    return {"ok": False, "message": "云端面板不能" + action + "你本机的 dsh——请在这台电脑上双击桌面「LLM Hub-日常开发」启动器"}
-
-
 @app.post("/api/harness/start")
 def api_harness_start():
-    if os.environ.get("HUB_CLOUD"):
-        return _cloud_local_dsh_denied("启动")
     return _dsh_start()
 
 
 @app.post("/api/harness/stop")
 def api_harness_stop():
-    if os.environ.get("HUB_CLOUD"):
-        return _cloud_local_dsh_denied("停止")
     return _dsh_stop()
 
 
 @app.post("/api/harness/dsh-sync")
 def api_harness_dsh_sync():
     """按号池分组重建 dsh settings.yaml（顶部全池 + 每号池一组）；dsh 在跑则重启注入 key。"""
-    if os.environ.get("HUB_CLOUD"):
-        return _cloud_local_dsh_denied("同步")
     return _dsh_sync_pools(load_data())
 
 
@@ -2765,6 +2697,12 @@ COPILOT_LOG_FILE = BASE_DIR / "logs" / "copilot.log"
 
 
 def _copilot_http_up():
+    if HUB_CLOUD:
+        try:
+            r = httpx.get(COPILOT_BASE + "/v1/models", timeout=2.0)
+            return r.status_code < 500
+        except Exception:
+            return False
     try:
         r = httpx.get("http://127.0.0.1:%d/v1/models" % COPILOT_PORT,
                       timeout=3.0, trust_env=False)
@@ -2774,6 +2712,7 @@ def _copilot_http_up():
 
 
 def _copilot_start():
+    if HUB_CLOUD: return {"ok": False, "message": "cloud mode: copilot-api managed by container"}
     """拉起 copilot-api server（GitHub Copilot 反代，OpenAI/Anthropic 兼容出口）。"""
     if _copilot_http_up():
         return {"ok": True, "started": False, "message": "已在运行"}
@@ -2935,47 +2874,30 @@ def _lan_ip():
     return ip
 
 
-# ---------------- 接入密钥管理（地址固定后，key 是唯一可变凭证） ----------------
-class KeyIn(BaseModel):
-    name: str = ""
-
-
-@app.post("/api/keys")
-def create_hub_key(inp: KeyIn):
-    """创建一个新接入 key：与主 key 同为全池权限，可随时重置（防泄露）/删除。"""
+@app.post("/api/call-config")
+async def api_call_config(req: Request):
+    """调用地址总开关：mode=lan（本机/局域网）/ public（公网），public_host 为公网地址"""
+    body = await req.json()
     d = load_data()
-    ks = d.setdefault("hub_keys", [])
-    k = {"id": uuid.uuid4().hex[:8],
-         "name": (inp.name or "").strip() or ("key-" + str(len(ks) + 1)),
-         "key": "hub-" + secrets.token_urlsafe(18),
-         "created_at": time.strftime("%Y-%m-%d %H:%M:%S")}
-    ks.append(k)
+    cc = d.get("call_config") or {}
+    cc.setdefault("mode", "lan")
+    cc.setdefault("public_host", "")
+    if "mode" in body:
+        m = str(body.get("mode") or "")
+        if m not in ("lan", "public"):
+            raise HTTPException(400, "mode 只能是 lan / public")
+        cc["mode"] = m
+    if "public_host" in body:
+        v = str(body.get("public_host") or "").strip().rstrip("/")
+        if not v and cc.get("public_host") and not body.get("clear_public_host"):
+            # 防误触（2026-09-21 用户拍板）：空值不清除已保存的公网地址，
+            # 需前端二次确认后带 clear_public_host=true 才会清空。
+            pass
+        else:
+            cc["public_host"] = v
+    d["call_config"] = cc
     save_data(d)
-    return k
-
-
-@app.post("/api/keys/{kid}/reset")
-def reset_hub_key(kid: str):
-    """重置接入 key：旧 key 立即失效，新 key 立即可用。"""
-    d = load_data()
-    for k in d.get("hub_keys") or []:
-        if k.get("id") == kid:
-            k["key"] = "hub-" + secrets.token_urlsafe(18)
-            save_data(d)
-            return {"ok": True, "key": k["key"]}
-    raise HTTPException(404, "key 不存在")
-
-
-@app.delete("/api/keys/{kid}")
-def delete_hub_key(kid: str):
-    d = load_data()
-    ks = d.get("hub_keys") or []
-    rest = [k for k in ks if k.get("id") != kid]
-    if len(rest) == len(ks):
-        raise HTTPException(404, "key 不存在")
-    d["hub_keys"] = rest
-    save_data(d)
-    return {"ok": True}
+    return {"ok": True, "call_config": cc, "lan_ip": _lan_ip()}
 
 
 def _autostart_copilot_worker():
@@ -3039,10 +2961,11 @@ if __name__ == "__main__":
         print("无需重复启动，直接在浏览器打开上面的地址即可。本窗口可以关闭。")
         sys.exit(0)
     print("LLM Key Hub 已启动: http://127.0.0.1:8787  (已监听 0.0.0.0，局域网设备可用 http://%s:8787 访问)" % _lan_ip())
-    threading.Thread(target=_autostart_harness_worker, daemon=True).start()
-    threading.Thread(target=_autostart_copilot_worker, daemon=True).start()
+    if not HUB_CLOUD:
+        threading.Thread(target=_autostart_harness_worker, daemon=True).start()
+        threading.Thread(target=_autostart_copilot_worker, daemon=True).start()
     try:
-        uvicorn.run(app, host=os.environ.get("HUB_BIND_HOST") or "0.0.0.0", port=8787, log_level="warning")
+        uvicorn.run(app, host="0.0.0.0", port=8787, log_level="warning")
     except OSError as e:
         print("启动失败：%r" % e)
         sys.exit(1)
