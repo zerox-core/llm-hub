@@ -62,6 +62,101 @@ def log_call(entry):
         pass
 
 
+# ---------------- 用户级 key 配额（R28 2026-09-24） ----------------
+# hub_keys 条目可带 pool_id（绑定号池 = 该 key 仅此池范围）与 quota
+# （rpm / daily_tokens / max_tokens）。计数器为进程内存级：hub 重启后当日
+# token 计数清零（v1 取舍；rpm 基本不受影响），需要精确账本时以 log_call 为准。
+
+_key_usage = {}
+
+
+def _key_id_of(hk):
+    return hk.get("id") or hk.get("key") or "?"
+
+
+def _key_quota_check(hk, body):
+    """None = 放行；否则 (status, error_dict)。会按需把 body['max_tokens'] 钳到 quota 上限。"""
+    q = hk.get("quota") or {}
+    if not q:
+        return None
+    kid = _key_id_of(hk)
+    with _lock:
+        e = _key_usage.setdefault(kid, {})
+        day = time.strftime("%Y-%m-%d")
+        if e.get("day") != day:
+            e["day"] = day
+            e["tokens"] = 0
+        minute = time.strftime("%Y-%m-%d %H:%M")
+        if e.get("minute") != minute:
+            e["minute"] = minute
+            e["count"] = 0
+        rpm = int(q.get("rpm") or 0)
+        if rpm and int(e.get("count") or 0) >= rpm:
+            return 429, {"message": "超出该 key 的每分钟调用上限（%d 次/分钟），请稍后再试。" % rpm,
+                         "type": "hub_key_rpm_limited"}
+        daily = int(q.get("daily_tokens") or 0)
+        if daily and int(e.get("tokens") or 0) >= daily:
+            return 429, {"message": "该 key 的当日 token 额度（%d）已用完，次日自动恢复。" % daily,
+                         "type": "hub_key_daily_tokens_exhausted"}
+        e["count"] = int(e.get("count") or 0) + 1
+    cap = int(q.get("max_tokens") or 0)
+    if cap:
+        cur = body.get("max_tokens")
+        try:
+            cur_i = int(cur) if cur is not None else None
+        except Exception:
+            cur_i = None
+        if cur_i is None or cur_i > cap:
+            body["max_tokens"] = cap
+    return None
+
+
+def _key_quota_record(hk, total_tokens):
+    if not hk or total_tokens is None:
+        return
+    try:
+        t = int(total_tokens)
+    except Exception:
+        return
+    with _lock:
+        e = _key_usage.get(_key_id_of(hk))
+        if e is not None:
+            e["tokens"] = int(e.get("tokens") or 0) + t
+
+
+def _key_usage_view(hk):
+    with _lock:
+        e = dict(_key_usage.get(_key_id_of(hk)) or {})
+    return {"key_id": _key_id_of(hk), "name": hk.get("name"),
+            "pool_id": hk.get("pool_id") or "", "quota": hk.get("quota") or {},
+            "today": {"day": e.get("day"), "tokens_used": int(e.get("tokens") or 0)},
+            "this_minute": {"minute": e.get("minute"), "requests": int(e.get("count") or 0)}}
+
+
+_QUOTA_FIELDS = ("rpm", "daily_tokens", "max_tokens")
+
+
+def _norm_quota(q):
+    if q is None:
+        return {}
+    if not isinstance(q, dict):
+        raise HTTPException(400, "quota 必须是对象，字段：rpm / daily_tokens / max_tokens")
+    out = {}
+    for f in _QUOTA_FIELDS:
+        v = q.get(f)
+        if v is None:
+            continue
+        try:
+            v = int(v)
+        except Exception:
+            raise HTTPException(400, "quota.%s 必须是整数" % f)
+        if v < 0:
+            raise HTTPException(400, "quota.%s 不能为负" % f)
+        if v:
+            out[f] = v
+    return out
+
+
 def read_logs(limit=200):
     """最新在前。"""
     if not LOG_FILE.exists():
@@ -1789,6 +1884,15 @@ def _require_hub_key(d, req):
         return None
     for hk in d.get("hub_keys") or []:
         if hk.get("key") and key == hk["key"]:
+            pid = (hk.get("pool_id") or "").strip()
+            if pid:
+                for pl in d.get("pools") or []:
+                    if pl.get("id") == pid:
+                        req.state.hub_key_entry = hk
+                        return pl
+                raise HTTPException(status_code=403,
+                                    detail="该接入 key 绑定的号池（%s）已不存在，请联系发放方。" % pid)
+            req.state.hub_key_entry = hk
             return None
     if key:
         for pl in d.get("pools") or []:
@@ -1846,6 +1950,15 @@ async def hub_chat(req: Request):
     body = await req.json()
     d = load_data()
     scope = _require_hub_key(d, req)
+    hk = getattr(req.state, "hub_key_entry", None)
+    if hk is not None:
+        rl = _key_quota_check(hk, body)
+        if rl is not None:
+            log_call({"source": "proxy", "provider": None,
+                      "model_requested": body.get("model") or "auto", "model_used": None,
+                      "ok": False, "blocked": True, "latency_ms": 0,
+                      "error": "key 配额拦截：" + rl[1]["type"]})
+            return JSONResponse(status_code=rl[0], content={"error": rl[1]})
     model = body.get("model") or "auto"
     stream = bool(body.get("stream"))
 
@@ -1963,7 +2076,7 @@ async def hub_chat(req: Request):
     if stream:
         # 流式不做轮询，直接用第一个候选透传
         p0, m0 = scoped[0]
-        return await _forward_stream(p0, body, m0, model_requested=model)
+        return await _forward_stream(p0, body, m0, model_requested=model, hk=hk)
 
     last = None
     cooled_groups = set()
@@ -1988,6 +2101,7 @@ async def hub_chat(req: Request):
                   "error": None if code == 200 else
                            (json.dumps(resp, ensure_ascii=False)[:300] if isinstance(resp, dict) else str(resp)[:300])})
         if code == 200:
+            _key_quota_record(hk, u.get("total_tokens"))
             return JSONResponse(content=resp,
                                 headers={"X-Hub-Model": m, "X-Hub-Provider": p.get("id")})
         last = (p, m, code, resp)
@@ -2026,9 +2140,14 @@ async def _forward_chat(p, body, model):
         return 502, {"error": {"message": "{}: {}".format(type(e).__name__, e)}}, ms
 
 
-async def _forward_stream(p, body, model, model_requested=None):
+async def _forward_stream(p, body, model, model_requested=None, hk=None):
     b = dict(body)
     b["model"] = model
+    # 用户级 key 带每日 token 额度时，让上游在流尾回传 usage，便于记账
+    if hk is not None and int(((hk.get("quota") or {}).get("daily_tokens")) or 0):
+        so = dict(b.get("stream_options") or {})
+        so["include_usage"] = True
+        b["stream_options"] = so
     headers = {"Authorization": "Bearer " + p["api_key"], "Content-Type": "application/json"}
     url = p["base_url"].rstrip("/") + "/chat/completions"
     t0 = time.time()
@@ -2037,8 +2156,11 @@ async def _forward_stream(p, body, model, model_requested=None):
     resp = await client.send(request, stream=True)
 
     async def gen():
+        tail = ""
         try:
             async for chunk in resp.aiter_raw():
+                if hk is not None:
+                    tail = (tail + chunk.decode("utf-8", "replace"))[-4000:]
                 yield chunk
         finally:
             ms = int((time.time() - t0) * 1000)
@@ -2047,6 +2169,10 @@ async def _forward_stream(p, body, model, model_requested=None):
                       "ok": resp.status_code == 200, "status": resp.status_code,
                       "latency_ms": ms, "stream": True,
                       "error": None if resp.status_code == 200 else "stream HTTP %d" % resp.status_code})
+            if hk is not None:
+                mts = re.findall(r'"total_tokens"\s*:\s*(\d+)', tail)
+                if mts:
+                    _key_quota_record(hk, int(mts[-1]))
             await resp.aclose()
             await client.aclose()
 
@@ -2066,6 +2192,15 @@ def _require_hub_key_anth(d, req):
         return None
     for hk in d.get("hub_keys") or []:
         if hk.get("key") and key == hk["key"]:
+            pid = (hk.get("pool_id") or "").strip()
+            if pid:
+                for pl in d.get("pools") or []:
+                    if pl.get("id") == pid:
+                        req.state.hub_key_entry = hk
+                        return pl
+                raise HTTPException(status_code=403,
+                                    detail="该接入 key 绑定的号池（%s）已不存在，请联系发放方。" % pid)
+            req.state.hub_key_entry = hk
             return None
     if key:
         for pl in d.get("pools") or []:
@@ -2288,6 +2423,15 @@ async def anth_messages(req: Request):
     body = await req.json()
     d = load_data()
     scope = _require_hub_key_anth(d, req)
+    hk = getattr(req.state, "hub_key_entry", None)
+    if hk is not None:
+        rl = _key_quota_check(hk, body)
+        if rl is not None:
+            log_call({"source": "proxy-anthropic", "provider": None,
+                      "model_requested": body.get("model") or "auto", "model_used": None,
+                      "ok": False, "blocked": True, "latency_ms": 0,
+                      "error": "key 配额拦截：" + rl[1]["type"]})
+            return _anth_err(rl[0], rl[1]["message"])
     model = body.get("model") or "auto"
     # 渠道隔离：限定写法解析失败显式报错；裸名多渠道 409；裸名无渠道 → 保留 Claude Code 的 auto 回退。
     if model != "auto":
@@ -2363,6 +2507,7 @@ async def anth_messages(req: Request):
         code, resp, ms = await _forward_chat(p, obody, m)
         usage = resp.get("usage") if code == 200 and isinstance(resp, dict) else None
         u = usage or {}
+        _key_quota_record(hk, u.get("total_tokens"))
         log_call({"source": "proxy-anthropic", "provider": p.get("name"),
                   "model_requested": body.get("model") or "auto", "model_used": m,
                   "ok": code == 200, "status": code, "latency_ms": ms,
@@ -3034,20 +3179,64 @@ def _lan_ip():
 # ---------------- 接入密钥管理（地址固定后，key 是唯一可变凭证） ----------------
 class KeyIn(BaseModel):
     name: str = ""
+    pool_id: str = ""           # 绑定号池 id：该 key 仅此池范围（空 = 全池权限）
+    quota: dict | None = None   # {"rpm": 30, "daily_tokens": 200000, "max_tokens": 2000}
+
+
+class KeyUpdate(BaseModel):
+    name: str | None = None
+    pool_id: str | None = None  # 传空字符串 = 解绑回全池
+    quota: dict | None = None   # 传 {} = 清除配额
 
 
 @app.post("/api/keys")
 def create_hub_key(inp: KeyIn):
-    """创建一个新接入 key：与主 key 同为全池权限，可随时重置（防泄露）/删除。"""
+    """创建接入 key。默认与主 key 同为全池权限；带 pool_id 则限定该号池范围，
+    带 quota 则按 key 限流（rpm / daily_tokens / max_tokens）。可随时重置/删除。"""
     d = load_data()
+    pid = (inp.pool_id or "").strip()
+    if pid and not any(pl.get("id") == pid for pl in d.get("pools") or []):
+        raise HTTPException(404, "号池 %s 不存在" % pid)
     ks = d.setdefault("hub_keys", [])
     k = {"id": uuid.uuid4().hex[:8],
          "name": (inp.name or "").strip() or ("key-" + str(len(ks) + 1)),
          "key": "hub-" + secrets.token_urlsafe(18),
-         "created_at": time.strftime("%Y-%m-%d %H:%M:%S")}
+         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+         "pool_id": pid,
+         "quota": _norm_quota(inp.quota)}
     ks.append(k)
     save_data(d)
     return k
+
+
+@app.put("/api/keys/{kid}")
+def update_hub_key(kid: str, inp: KeyUpdate):
+    """改 key 的名称 / 号池绑定 / 配额（用户升降级：换 pool_id 即换可访问模型组）。"""
+    d = load_data()
+    for k in d.get("hub_keys") or []:
+        if k.get("id") == kid:
+            if inp.name is not None and inp.name.strip():
+                k["name"] = inp.name.strip()
+            if inp.pool_id is not None:
+                pid = inp.pool_id.strip()
+                if pid and not any(pl.get("id") == pid for pl in d.get("pools") or []):
+                    raise HTTPException(404, "号池 %s 不存在" % pid)
+                k["pool_id"] = pid
+            if inp.quota is not None:
+                k["quota"] = _norm_quota(inp.quota)
+            save_data(d)
+            return k
+    raise HTTPException(404, "key 不存在")
+
+
+@app.get("/api/keys/{kid}/usage")
+def hub_key_usage(kid: str):
+    """查某 key 的配额与当日用量（计数器进程内存级，hub 重启清零）。"""
+    d = load_data()
+    for k in d.get("hub_keys") or []:
+        if k.get("id") == kid:
+            return _key_usage_view(k)
+    raise HTTPException(404, "key 不存在")
 
 
 @app.post("/api/keys/{kid}/reset")
