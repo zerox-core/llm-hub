@@ -11,3 +11,6 @@ _*.py
 _*.txt
 _*.ps1
 *.txt
+
+# R31: 控制台令牌入口 URL（含敏感 token，禁止入库）
+remote_console_url.txt

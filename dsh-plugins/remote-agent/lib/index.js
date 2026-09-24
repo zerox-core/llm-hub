@@ -20,6 +20,13 @@
  * array-arg spawn (no shell interpolation of request input); no free-form command surface.
  * dsh services are resolved lazily via ctx.get() so a missing optional service
  * degrades one endpoint instead of breaking plugin boot.
+ *
+ * R31 (2026-09-24):
+ *   GET /remote-agent | /remote-agent/ | /remote-agent/console.html   RemoteConsole page (static)
+ *   Every /remote-agent/api/* route now requires the shared console token
+ *   (remote_console_token in F:\llm_hub\data.json) via `Authorization: Bearer`
+ *   or `?token=` — FAIL-CLOSED: unconfigured token locks all APIs (503).
+ *   The page itself carries no secrets and stays ungated.
  */
 
 import net from "node:net";
@@ -28,12 +35,32 @@ import path from "node:path";
 import readline from "node:readline";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
 
 const REPORTS_PATH = "F:\\llm_hub\\logs\\agent_reports.jsonl";
 const REPORTS_TAIL = 100;
 
 /** 手机端新建会话的默认工作区根（复用 session-zone 的会话区约定）。 */
 const REMOTE_ZONE_ROOT = "F:\\deepseek-harness\\playground";
+
+/** RemoteConsole 页面：与 index.js 同目录，随请求读盘——改页面无需重启 dsh。 */
+const PLUGIN_DIR = path.dirname(fileURLToPath(import.meta.url));
+const CONSOLE_HTML = path.join(PLUGIN_DIR, "console.html");
+
+/** 控制台令牌：data.json.remote_console_token（mtime 缓存——换 token 无需重启 dsh）。 */
+const DATA_JSON = "F:\\llm_hub\\data.json";
+let _tokenCache = { mtimeMs: -1, token: "" };
+function readRemoteToken() {
+  try {
+    const st = fs.statSync(DATA_JSON);
+    if (_tokenCache.mtimeMs === st.mtimeMs) return _tokenCache.token;
+    const tok = String(JSON.parse(fs.readFileSync(DATA_JSON, "utf8")).remote_console_token || "");
+    _tokenCache = { mtimeMs: st.mtimeMs, token: tok };
+    return tok;
+  } catch (_) {
+    return "";
+  }
+}
 
 const SERVICES = [
   {
@@ -317,13 +344,61 @@ function apply(ctx) {
 
   const byId = new Map(SERVICES.map((s) => [s.id, s]));
 
+  /* ---------- v3 (R31): token auth + console page ---------- */
+
+  // fail-closed：data.json 未配置 remote_console_token 时，所有 API 一律拒绝
+  const unauthorized = (req, res) => {
+    const want = readRemoteToken();
+    if (!want) {
+      send(res, 503, { ok: false, error: "remote_console_token 未配置，API 已锁定" });
+      return true;
+    }
+    let got = "";
+    try {
+      const url = new URL(req.url || "/", "http://127.0.0.1");
+      got =
+        String((req.headers && req.headers.authorization) || "").replace(/^Bearer\s+/i, "") ||
+        url.searchParams.get("token") ||
+        "";
+    } catch (_) {
+      got = "";
+    }
+    if (got !== want) {
+      send(res, 401, { ok: false, error: "unauthorized" });
+      return true;
+    }
+    return false;
+  };
+
+  const serveConsole = (res) => {
+    try {
+      const html = fs.readFileSync(CONSOLE_HTML);
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+      res.end(html);
+    } catch (e) {
+      res.writeHead(500, { "content-type": "text/plain; charset=utf-8" });
+      res.end("console.html 读取失败: " + String((e && e.message) || e));
+    }
+  };
+
+  for (const pagePath of ["/remote-agent", "/remote-agent/", "/remote-agent/console.html"]) {
+    ctx.effect(() =>
+      ctx.webServer.register({
+        kind: "exact",
+        path: pagePath,
+        handler: async (_req, res) => serveConsole(res),
+      })
+    );
+  }
+
   /* ---------- v1: service control + reports ---------- */
 
   ctx.effect(() =>
     ctx.webServer.register({
       kind: "exact",
       path: "/remote-agent/api/services",
-      handler: async (_req, res) => {
+      handler: async (req, res) => {
+        if (unauthorized(req, res)) return;
         const data = await Promise.all(SERVICES.map(serviceState));
         send(res, 200, { ok: true, data });
       },
@@ -335,7 +410,8 @@ function apply(ctx) {
       ctx.webServer.register({
         kind: "exact",
         path: "/remote-agent/api/services/" + svc.id + "/start",
-        handler: async (_req, res) => {
+        handler: async (req, res) => {
+        if (unauthorized(req, res)) return;
           if (svc.startAs === "ps1") runPs1(svc.startCmd);
           else runBat(svc.startCmd);
           send(res, 200, { ok: true, data: { id: svc.id, action: "start", dispatched: true } });
@@ -347,7 +423,8 @@ function apply(ctx) {
         ctx.webServer.register({
           kind: "exact",
           path: "/remote-agent/api/services/" + svc.id + "/stop",
-          handler: async (_req, res) => {
+          handler: async (req, res) => {
+        if (unauthorized(req, res)) return;
             if (svc.stopCmd) runBat(svc.stopCmd);
             else if (svc.stopByImage) await killByImage(svc.stopByImage);
             else await killByCmdMatch(svc.procMatch);
@@ -362,7 +439,8 @@ function apply(ctx) {
     ctx.webServer.register({
       kind: "exact",
       path: "/remote-agent/api/reports",
-      handler: async (_req, res) => {
+      handler: async (req, res) => {
+        if (unauthorized(req, res)) return;
         try {
           send(res, 200, { ok: true, data: await readReports() });
         } catch (e) {
@@ -379,6 +457,7 @@ function apply(ctx) {
       kind: "exact",
       path: "/remote-agent/api/dsh/sessions",
       handler: async (req, res) => {
+        if (unauthorized(req, res)) return;
         try {
           const sq = svc(ctx, "sessionQuery");
           if (!sq) {
@@ -425,6 +504,7 @@ function apply(ctx) {
       kind: "exact",
       path: "/remote-agent/api/dsh/session-events",
       handler: async (req, res) => {
+        if (unauthorized(req, res)) return;
         try {
           const url = new URL(req.url || "/remote-agent/api/dsh/session-events", "http://127.0.0.1");
           const sid = String(url.searchParams.get("id") || "");
@@ -489,7 +569,8 @@ function apply(ctx) {
     ctx.webServer.register({
       kind: "exact",
       path: "/remote-agent/api/dsh/model",
-      handler: async (_req, res) => {
+      handler: async (req, res) => {
+        if (unauthorized(req, res)) return;
         try {
           const dm = svc(ctx, "agentDefaultModel");
           if (!dm || typeof dm.currentSelection !== "function") {
@@ -509,7 +590,8 @@ function apply(ctx) {
     ctx.webServer.register({
       kind: "exact",
       path: "/remote-agent/api/dsh/active",
-      handler: async (_req, res) => {
+      handler: async (req, res) => {
+        if (unauthorized(req, res)) return;
         const rows = [];
         for (const [sid, rec] of liveAgents) rows.push(publicAgentEntry(sid, rec));
         send(res, 200, { ok: true, data: rows });
@@ -522,6 +604,7 @@ function apply(ctx) {
       kind: "exact",
       path: "/remote-agent/api/dsh/session-create",
       handler: async (req, res) => {
+        if (unauthorized(req, res)) return;
         if (req.method !== "POST") {
           send(res, 405, { ok: false, error: "POST only" });
           return;
@@ -666,6 +749,7 @@ function apply(ctx) {
       kind: "exact",
       path: "/remote-agent/api/dsh/session-prompt",
       handler: async (req, res) => {
+        if (unauthorized(req, res)) return;
         if (req.method !== "POST") {
           send(res, 405, { ok: false, error: "POST only" });
           return;
@@ -737,6 +821,7 @@ function apply(ctx) {
       kind: "exact",
       path: "/remote-agent/api/dsh/session-cancel",
       handler: async (req, res) => {
+        if (unauthorized(req, res)) return;
         if (req.method !== "POST") {
           send(res, 405, { ok: false, error: "POST only" });
           return;

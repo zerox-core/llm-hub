@@ -9,6 +9,8 @@
     hub_ui_kit.js       手动更新按钮 + 侧栏箭头收起/边缘弹出 + 页面全铺开
     hub_session_zone.js 会话区（时间分区创建 + 删除双选项弹窗 + Codex 风格
                         扁平会话列表 + 隐藏工作区文件夹体系）
+    hub_remote_console.js R31 远程控制台侧栏入口（点击弹出嵌入 iframe 面板，
+                        手机端同路径页面共用 /remote-agent/）
 
 2026-09-23 R24：移除 hub_model_card.js（页内旧版模型切换卡片）——dsh 输入栏
 已有原生模型选择器；旧标记保留在 STRIP_BLOCKS 里保证剥离干净。
@@ -35,11 +37,13 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 BLOCKS = [
     ("hub_ui_kit.js", "<!-- HUB-UI-KIT BEGIN -->", "<!-- HUB-UI-KIT END -->"),
     ("hub_session_zone.js", "<!-- HUB-SESSION-ZONE BEGIN -->", "<!-- HUB-SESSION-ZONE END -->"),
+    ("hub_remote_console.js", "<!-- HUB-REMOTE-CONSOLE BEGIN -->", "<!-- HUB-REMOTE-CONSOLE END -->"),
 ]
 
 # 所有历史注入标记：剥离时一律清掉（含已下线的模型卡片）
 STRIP_MARKERS = [
     ("<!-- HUB-MODEL-CARD BEGIN -->", "<!-- HUB-MODEL-CARD END -->"),
+    ("<!-- HUB-REMOTE-CONSOLE BEGIN -->", "<!-- HUB-REMOTE-CONSOLE END -->"),
     ("<!-- HUB-UI-KIT BEGIN -->", "<!-- HUB-UI-KIT END -->"),
     ("<!-- HUB-SESSION-ZONE BEGIN -->", "<!-- HUB-SESSION-ZONE END -->"),
 ]
