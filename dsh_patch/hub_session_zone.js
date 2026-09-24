@@ -418,6 +418,7 @@
    * 把分区行重排成一条会话样式行：
    * 主文案 = 其内会话标题 + 小字分区时间；隐藏子级会话行；点分区行 = 进会话。
    * R24：非会话区（项目）工作区行及其子会话行整体隐藏；分区行文件夹图标隐藏。
+   * R26：项目工作区行及子会话行恢复显示（hideWorkspaceHeader/hideWorkspaceChips 一并停用）。
    */
   function restyleZoneRows() {
     var root = document.querySelector('.hHd-Xa_root');
@@ -438,16 +439,14 @@
           inNonZone = false;
           rows[curZone] = it;
         } else {
-          // 项目工作区文件夹行：Codex 风格下不显示
+          // 项目工作区文件夹行：R26 起恢复显示（用户反馈看不到正常工作区）
           curZone = null;
           inNonZone = true;
-          if (it.style.display !== 'none') { it.style.display = 'none'; }
         }
         continue;
       }
       if (inNonZone) {
-        // 项目工作区下的会话行一并隐藏
-        if (it.style.display !== 'none') { it.style.display = 'none'; }
+        // 项目工作区下的会话行：R26 起恢复显示
         continue;
       }
       if (curZone && !childOf[curZone]) { childOf[curZone] = it; }
@@ -626,8 +625,8 @@
     mountBar();
     injectZoneRowControls();
     restyleZoneRows();
-    hideWorkspaceHeader();
-    hideWorkspaceChips();
+    // R26：工作区隐藏下线（hideWorkspaceHeader / hideWorkspaceChips 不再调用，
+    // 函数保留以便日后需要时恢复；用户反馈看不到正常的工作区）
     restyleMenus();
     tickN++;
     if (tickN % 15 === 0) { refreshList(); } // 约 13s 一次后台刷新
