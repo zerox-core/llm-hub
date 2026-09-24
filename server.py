@@ -493,11 +493,48 @@ def model_disabled(p, model):
 
 
 def find_model_provider(d, model):
-    """指定模型 → 第一个拥有该模型的渠道；都没有则 None。"""
+    """指定模型 → 第一个拥有该模型的渠道；都没有则 None。（保留作兼容，新逻辑走 resolve_model）"""
     for p in d["providers"]:
         if model in (p.get("models") or []):
             return p
     return None
+
+
+def find_model_providers(d, model):
+    """指定模型 → 拥有该模型的全部渠道（渠道隔离的基础）。"""
+    return [p for p in d["providers"] if model in (p.get("models") or [])]
+
+
+def resolve_model(d, model, scope=None, extra_cats=None):
+    """模型 → 渠道 的隔离解析（2026-09-24 拍板：不同上游的同名模型不做自动归并/挑选）。
+    - 支持「渠道名::模型名 / 渠道id::模型名」限定写法，精确落到该渠道；
+    - 裸名只在唯一渠道（或号池 scope 内唯一）时放行；
+    - 多渠道同名 → (None, 裸名, (409, 提示))，不做静默自动挑选；
+    - 限定写法渠道存在但无该模型 / 渠道不存在 → (None, 裸名, (404, 提示))；
+    - 裸名无任何渠道拥有 → (None, 裸名, None)，由调用方按旧逻辑兜底。
+    返回 (provider|None, 裸模型名, (status, message)|None)。"""
+    raw = str(model or "").strip()
+    if "::" in raw:
+        sel, _, bare = raw.partition("::")
+        sel, bare = sel.strip(), bare.strip()
+        for p in d["providers"]:
+            if sel in (p.get("id"), p.get("name")):
+                if bare in (p.get("models") or []):
+                    return p, bare, None
+                return None, bare, (404, "渠道「%s」没有模型 %s。限定写法：渠道名::模型名。" % (p.get("name"), bare))
+        return None, bare, (404, "找不到渠道：%s。限定写法：渠道名::模型名。" % sel)
+    provs = find_model_providers(d, raw)
+    if scope is not None:
+        allowed = pool_scope_set(d, scope, extra_cats=extra_cats)
+        provs = [p for p in provs if (p["id"], raw) in allowed]
+    if len(provs) > 1:
+        who = "、".join("%s::%s" % (p.get("name") or p.get("id"), raw) for p in provs)
+        return None, raw, (409,
+            "模型 %s 同时存在于多个渠道（%s）。不同上游的同名模型不是同一个模型，已停止自动挑选；"
+            "请改用「渠道名::模型名」或请求头 X-Hub-Provider 指定渠道。" % (raw, who))
+    if provs:
+        return provs[0], raw, None
+    return None, raw, None
 
 
 def pool_scope_candidates(d, pl, extra_cats=None):
@@ -1126,16 +1163,25 @@ class HarnessModelIn(BaseModel):
 
 
 def _harness_options(d):
-    """可选模型 = 各渠道号池中已勾选、且满足免费额度/AG 组策略的可对话模型。"""
+    """可选模型 = 各渠道号池中已勾选、且满足免费额度/AG 组策略的可对话模型。
+    渠道隔离（2026-09-24）：同名模型存在于多个渠道时，渲染为「渠道名::模型名」限定写法。"""
+    holder_count = {}
+    for p in d["providers"]:
+        if not p.get("base_url"):
+            continue
+        for m in (p.get("models") or []):
+            holder_count[m] = holder_count.get(m, 0) + 1
     opts = []
     for p in d["providers"]:
         if not p.get("base_url"):
             continue
         ms = chat_candidates(d, p)
         if ms:
+            ms_out = [("%s::%s" % (p.get("name") or p["id"], m)
+                       if holder_count.get(m, 0) > 1 else m) for m in ms]
             opts.append({"provider_id": p["id"],
                          "provider_name": p.get("name") or p["id"],
-                         "models": ms})
+                         "models": ms_out})
     return opts
 
 
@@ -1151,13 +1197,15 @@ def set_harness_model(inp: HarnessModelIn):
     d = load_data()
     m = (inp.model or "auto").strip()
     if m != "auto":
-        p = find_model_provider(d, m)
+        p, mb, me = resolve_model(d, m)
+        if me:
+            raise HTTPException(me[0], me[1])
         if p is None:
             raise HTTPException(404, "模型不在任何渠道：%s" % m)
-        if model_disabled(p, m):
-            raise HTTPException(400, "模型未在号池中勾选：%s" % m)
-        if model_category(m) not in CHAT_CATS:
-            raise HTTPException(400, "该模型不是可对话模型：%s" % m)
+        if model_disabled(p, mb):
+            raise HTTPException(400, "模型未在号池中勾选：%s" % mb)
+        if model_category(mb) not in CHAT_CATS:
+            raise HTTPException(400, "该模型不是可对话模型：%s" % mb)
     d["harness_model"] = m
     save_data(d)
     return {"ok": True, "model": m}
@@ -1758,21 +1806,31 @@ def hub_models(req: Request):
     scope = _require_hub_key(d, req)
     data = [{"id": "auto", "object": "model", "owned_by": "llm-hub"}]
     seen = {"auto"}
+    # 渠道隔离（2026-09-24）：唯一渠道的模型出裸 id；同名多渠道各出一条「渠道名::模型名」限定 id，不再归并。
     if scope is not None:
-        for p, m in pool_scope_candidates(d, scope, extra_cats={"图像生成"}):
+        pairs = pool_scope_candidates(d, scope, extra_cats={"图像生成"})
+    else:
+        pairs = [(p, m) for p in d["providers"]
+                 for m in chat_candidates(d, p, extra_cats={"图像生成"})]
+    holders = {}
+    for p, m in pairs:
+        holders.setdefault(m, []).append(p)
+    for m, ps in holders.items():
+        if len(ps) == 1:
             if m in seen:
                 continue
             seen.add(m)
             data.append({"id": m, "object": "model",
-                         "owned_by": scope.get("name") or "pool"})
-        return {"object": "list", "data": data}
-    for p in d["providers"]:
-        for m in chat_candidates(d, p, extra_cats={"图像生成"}):
-            if m in seen:
-                continue
-            seen.add(m)
-            data.append({"id": m, "object": "model",
-                         "owned_by": p.get("name") or p.get("type") or "provider"})
+                         "owned_by": (scope.get("name") if scope is not None else None)
+                         or ps[0].get("name") or ps[0].get("type") or "provider"})
+        else:
+            for p in ps:
+                qid = "%s::%s" % (p.get("name") or p.get("id"), m)
+                if qid in seen:
+                    continue
+                seen.add(qid)
+                data.append({"id": qid, "object": "model",
+                             "owned_by": p.get("name") or p.get("type") or "provider"})
     return {"object": "list", "data": data}
 
 
@@ -1796,19 +1854,21 @@ async def hub_chat(req: Request):
     if model == "auto" and not req.headers.get("x-hub-provider") and scope is None:
         pin = (d.get("harness_model") or "auto").strip()
         if pin and pin != "auto":
-            _pp = find_model_provider(d, pin)
-            if _pp is None or model_disabled(_pp, pin):
+            _pp, _pm, _pe = resolve_model(d, pin)
+            if _pe or _pp is None or model_disabled(_pp, _pm):
                 log_call({"source": "proxy", "provider": None,
                           "model_requested": "auto", "model_used": None,
                           "ok": False, "blocked": True, "latency_ms": 0,
                           "error": "锁定模型不可用：" + pin})
                 return JSONResponse(status_code=409, content={"error": {
-                    "message": "Harness 锁定模型 %s 已不可用（被删除或未在号池勾选）。请到 Harness 页重新选择，或切回 Auto。" % pin,
+                    "message": "Harness 锁定模型 %s 已不可用（被删除、未在号池勾选或同名多渠道冲突）。请到 Harness 页重新选择（同名模型用 渠道名::模型名 锁定），或切回 Auto。" % pin,
                     "type": "hub_pin_invalid"}})
             model = pin
 
     if req.headers.get("x-hub-provider"):
         p = _pick_provider(d, req)
+        if model != "auto" and "::" in model:
+            model = model.partition("::")[2].strip()
         scoped = [(p, m) for m in (chat_candidates(d, p) if model == "auto" else [model])]
         if scope is not None:
             allowed = pool_scope_set(d, scope)
@@ -1816,8 +1876,27 @@ async def hub_chat(req: Request):
     elif model == "auto":
         scoped = pool_scope_candidates(d, scope) if scope is not None else all_chat_candidates(d)
     else:
-        p = find_model_provider(d, model)
+        # 渠道隔离：裸名唯一渠道放行；同名多渠道 409（不再自动挑第一个）；限定写法精确落渠道。
+        p, _mb, _me = resolve_model(d, model, scope=scope, extra_cats={"图像生成"})
+        if _me:
+            log_call({"source": "proxy", "provider": None,
+                      "model_requested": model, "model_used": None,
+                      "ok": False, "blocked": True, "latency_ms": 0,
+                      "error": "同名模型隔离拦截：" + model})
+            return JSONResponse(status_code=_me[0], content={"error": {
+                "message": _me[1], "type": "hub_model_ambiguous"}})
+        model = _mb
         if p is None:
+            if scope is not None:
+                if find_model_providers(d, model):
+                    log_call({"source": "proxy", "provider": None,
+                              "model_requested": model, "model_used": None,
+                              "ok": False, "blocked": True, "latency_ms": 0,
+                              "error": "号池范围拦截：" + model})
+                    return JSONResponse(status_code=403, content={"error": {
+                        "message": "模型 %s 不在号池「%s」范围内，已拦截。" % (model, scope.get("name")),
+                        "type": "hub_pool_scope"}})
+                raise HTTPException(404, "模型 %s 不在号池「%s」范围内" % (model, scope.get("name")))
             if scope is not None:
                 raise HTTPException(404, "模型 %s 不在号池「%s」范围内" % (model, scope.get("name")))
             if not d["providers"]:
@@ -2210,14 +2289,19 @@ async def anth_messages(req: Request):
     d = load_data()
     scope = _require_hub_key_anth(d, req)
     model = body.get("model") or "auto"
-    if find_model_provider(d, model) is None:
-        model = "auto"
+    # 渠道隔离：限定写法解析失败显式报错；裸名多渠道 409；裸名无渠道 → 保留 Claude Code 的 auto 回退。
+    if model != "auto":
+        _p0, _m0, _e0 = resolve_model(d, model)
+        if _e0:
+            return _anth_err(_e0[0], _e0[1])
+        if _p0 is None and "::" not in str(model):
+            model = "auto"
     if model == "auto" and not req.headers.get("x-hub-provider") and scope is None:
         pin = (d.get("harness_model") or "auto").strip()
         if pin and pin != "auto":
-            _pp = find_model_provider(d, pin)
-            if _pp is None or model_disabled(_pp, pin):
-                return _anth_err(409, "Harness 锁定模型 %s 已不可用，请到 Harness 页重新选择或切回 Auto。" % pin)
+            _pp, _pm, _pe = resolve_model(d, pin)
+            if _pe or _pp is None or model_disabled(_pp, _pm):
+                return _anth_err(409, "Harness 锁定模型 %s 已不可用（或同名多渠道冲突，请用 渠道名::模型名 锁定），请到 Harness 页重新选择或切回 Auto。" % pin)
             model = pin
     obody = _anth_to_openai(body)
     obody["model"] = model
@@ -2225,6 +2309,8 @@ async def anth_messages(req: Request):
 
     if req.headers.get("x-hub-provider"):
         p = _pick_provider(d, req)
+        if model != "auto" and "::" in model:
+            model = model.partition("::")[2].strip()
         scoped = [(p, m) for m in (chat_candidates(d, p) if model == "auto" else [model])]
         if scope is not None:
             allowed = pool_scope_set(d, scope)
@@ -2232,7 +2318,17 @@ async def anth_messages(req: Request):
     elif model == "auto":
         scoped = pool_scope_candidates(d, scope) if scope is not None else all_chat_candidates(d)
     else:
-        p = find_model_provider(d, model)
+        # 渠道隔离：同名多渠道 409，不再自动挑第一个；限定写法精确落渠道。
+        p, _mb, _me = resolve_model(d, model, scope=scope, extra_cats={"图像生成"})
+        if _me:
+            log_call({"source": "proxy-anthropic", "provider": None,
+                      "model_requested": model, "model_used": None,
+                      "ok": False, "blocked": True, "latency_ms": 0,
+                      "error": "同名模型隔离拦截：" + str(model)})
+            return _anth_err(_me[0], _me[1])
+        model = _mb
+        if p is None:
+            return _anth_err(404, "找不到模型：%s（不在任何渠道，或不在号池范围内）" % model)
         scoped = [(p, model)]
         if scope is not None and (p["id"], model) not in pool_scope_set(d, scope, extra_cats={"图像生成"}):
             return _anth_err(403, "模型 %s 不在号池「%s」范围内，已拦截。" % (model, scope.get("name")))

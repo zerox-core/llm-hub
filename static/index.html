@@ -158,6 +158,7 @@ function qState(m){
 
 // ---- 模型勾选（号池）----
 function isEnabled(p, m){ return !(p.disabled_models || []).includes(m); }
+function collide(m){ return (STATE.providers||[]).filter(x => (x.models||[]).includes(m)).length > 1; }
 function enabledCount(p){
   const total = (p.models||[]).length;
   return total - ((p.disabled_models||[]).filter(m => (p.models||[]).includes(m)).length);
@@ -247,8 +248,9 @@ function quotaCell(m, isBailian, p){
       '<span class="quota-bar"><i class="'+cls+'" style="width:'+pct.toFixed(1)+'%"></i></span>' +
       '<span class="q-num">组余 '+(Math.round(worst*1000)/10)+'%</span>';
   }
+  if(!isBailian) return '<span class="q-num">—</span>';
   const q = (STATE.quota && STATE.quota.entries) ? STATE.quota.entries[m] : null;
-  if(!q) return isBailian ? '<span class="q-num" style="color:var(--bad)">无免费额度</span>' : '<span class="q-num">—</span>';
+  if(!q) return '<span class="q-num" style="color:var(--bad)">无免费额度</span>';
   const st = qState(m);
   let pct = null;
   if(q.total && q.remaining !== null && q.remaining !== undefined && Number(q.total) > 0){
@@ -453,7 +455,7 @@ function renderProvider(p, forceOpen){
         : '<button class="small" onclick="testModel(\''+p.id+'\',\''+esc(m)+'\')">测试</button> ';
       return '<tr class="'+(cur?'current':'')+(en?'':' mdis')+'">' +
         '<td style="width:3%"><input type="checkbox" class="mchk" title="勾选 = 进入可调列表（轮询与 Harness 单选）" '+(en?'checked ':'')+'onchange="toggleModel(\''+p.id+'\',\''+esc(m)+'\', this.checked)"></td>' +
-        '<td class="model-id">'+esc(m)+(cur?' <span class="chip blue">当前</span>':'')+(en?'':' <span class="chip">未勾选</span>')+'</td>' +
+        '<td class="model-id">'+esc(m)+(collide(m)?' <span class="chip" title="同名模型存在于多个渠道：经 Hub 统一入口请用「渠道名::模型名」或 X-Hub-Provider 指定渠道">同名多渠道</span>':'')+(cur?' <span class="chip blue">当前</span>':'')+(en?'':' <span class="chip">未勾选</span>')+'</td>' +
         '<td>'+quotaCell(m, isBailian, p)+'</td>' +
         '<td>'+testCell(p, m)+'</td>' +
         '<td style="white-space:nowrap">' +
