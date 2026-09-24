@@ -43,12 +43,24 @@ if ($tok) {
     $hbTokChanged = $true
     W ("hb token synced ({0}...)" -f $tok.Substring(0, [Math]::Min(8, $tok.Length)))
   }
-  foreach ($pf in @('F:\zeroxcore\hermes.properties', 'F:\zeroxcore\.worktrees\mobile-remote-pre\hermes.properties')) {
-    if (Test-Path $pf) {
-      $txt = [IO.File]::ReadAllText($pf)
-      $new = [regex]::Replace($txt, '(?m)^(dshRemoteToken\s*=).*$', ('${1}' + $tok))
-      if ($new -ne $txt) { [IO.File]::WriteAllText($pf, $new); W "props dshRemoteToken synced: $pf" }
+  # R36 fix: dshRemoteToken must be the remote-agent token (data.json remote_console_token),
+  # NOT the dsh web session token above (that one made the Android app get 401).
+  $rct = $null
+  if (Test-Path 'F:\llm_hub\data.json') {
+    $m2 = Select-String -Path 'F:\llm_hub\data.json' -Pattern '"remote_console_token"\s*:\s*"([^"]+)"'
+    if ($m2) { $rct = $m2.Matches[0].Groups[1].Value }
+  }
+  if ($rct) {
+    foreach ($pf in @('F:\zeroxcore\hermes.properties', 'F:\zeroxcore\.worktrees\mobile-remote-pre\hermes.properties')) {
+      if (Test-Path $pf) {
+        $txt = [IO.File]::ReadAllText($pf)
+        $new = [regex]::Replace($txt, '(?m)^(dshRemoteToken\s*=).*$', ('${1}' + $rct))
+        if ($tok) { $new = [regex]::Replace($new, '(?m)^(dshWebToken\s*=).*$', ('${1}' + $tok)) }
+        if ($new -ne $txt) { [IO.File]::WriteAllText($pf, $new); W ("props dsh tokens synced (rct {0}...): {1}" -f $rct.Substring(0, [Math]::Min(8, $rct.Length)), $pf) }
+      }
     }
+  } else {
+    W 'WARN: remote_console_token missing in F:\llm_hub\data.json'
   }
 } else {
   W 'WARN: no token found in dsh.log (dsh may still be starting)'
