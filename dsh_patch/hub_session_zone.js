@@ -629,9 +629,70 @@
     // 函数保留以便日后需要时恢复；用户反馈看不到正常的工作区）
     restyleMenus();
     tickN++;
-    if (tickN % 15 === 0) { refreshList(); } // 约 13s 一次后台刷新
+    if (tickN % 10 === 0) { refreshList(); } // 约 30s 一次后台刷新
   }
 
-  setInterval(tick, 900);
+  /* ---------- 闪烁修复（R27，2026-09-24） ----------
+     dsh 前端会自行重渲染侧栏（会话相对时间刷新、状态推送、hover 等），重渲染会把
+     我们在行上的改造（隐藏子行 / 改写标题 / 藏图标 / 注入按钮）打掉；原先 900ms
+     盲轮询最长近 1 秒才补回 → 行样式反复"闪回原样"，肉眼看到卡片背景闪烁。
+     现改为 MutationObserver 监听侧栏子树：dsh 一改动立即（60ms 去抖内）补挂，
+     空窗缩到一帧内；轮询降为 3s 一次仅作兜底。我们自己注入的节点改动会被过滤，
+     不会自触发。 */
+
+  var obArmed = false, scheduled = false;
+
+  function insideOurs(tgt) {
+    var n = tgt && (tgt.nodeType === 1 ? tgt : tgt.parentElement);
+    return !!(n && n.closest && n.closest(
+      '.hub-zone-bar,.hub-zone-mask,.hub-zone-toast,' +
+      '[data-hub-zone-title],[data-hub-zone-name],[data-hub-zone-time],.hub-zone-tag'));
+  }
+
+  function isOurs(n) {
+    if (!n || n.nodeType !== 1) { return false; }
+    if (n.matches('.hub-zone-bar,.hub-zone-del,.hub-zone-asg,.hub-zone-tag,.hub-zone-time,' +
+        '.hub-zone-mask,.hub-zone-toast,[data-hub-zone-name],[data-hub-zone-title]')) { return true; }
+    return !!(n.querySelector && n.querySelector(
+      '.hub-zone-del,.hub-zone-asg,.hub-zone-tag,[data-hub-zone-name],[data-hub-zone-time]'));
+  }
+
+  function schedule() {
+    if (scheduled) { return; }
+    scheduled = true;
+    setTimeout(function () { scheduled = false; tick(); }, 60);
+  }
+
+  function armObserver() {
+    if (obArmed || typeof MutationObserver !== 'function' || !document.body) { return; }
+    obArmed = true;
+    var ob = new MutationObserver(function (muts) {
+      var sb = document.querySelector('.hHd-Xa_root');
+      if (!sb) { return; }
+      for (var i = 0; i < muts.length; i++) {
+        var m = muts[i];
+        if (insideOurs(m.target)) { continue; }
+        if (m.type === 'characterData') {
+          if (sb.contains(m.target)) { schedule(); return; }
+          continue;
+        }
+        if (m.type !== 'childList') { continue; }
+        var j, an, allOurs = m.addedNodes.length > 0;
+        for (j = 0; j < m.addedNodes.length; j++) {
+          an = m.addedNodes[j];
+          if (an.nodeType === 1 && (an.matches('.hHd-Xa_root') ||
+              (an.querySelector && an.querySelector('.hHd-Xa_root')))) { schedule(); return; }
+          if (!isOurs(an)) { allOurs = false; }
+        }
+        if (allOurs) { continue; }           // 只新增了我们自己的注入物
+        if (!sb.contains(m.target)) { continue; }
+        schedule(); return;
+      }
+    });
+    ob.observe(document.body, { childList: true, subtree: true, characterData: true });
+  }
+
+  setInterval(tick, 3000); // 兜底轮询（observer 漏网路径）
+  armObserver();
   tick();
 })();
