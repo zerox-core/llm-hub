@@ -11,8 +11,8 @@
  *   GET  /remote-agent/api/dsh/session-events?id=<sid>&limit=200   session event tail as chat lines
  *   POST /remote-agent/api/dsh/session-create               {prompt, title?, cwd?, model?{provider,model}, agentPreset?}
  *                                                            → create Agent + queue first prompt (fire-and-forget)
- *   POST /remote-agent/api/dsh/session-prompt               {sessionId, prompt} follow-up (phone-created live agents)
- *   POST /remote-agent/api/dsh/session-cancel                {sessionId} interrupt a busy phone-created agent
+ *   POST /remote-agent/api/dsh/session-prompt               {sessionId, prompt} follow-up（R39 起支持任意可见会话：复用进程内活跃 agent 或 agents.resume 恢复持久化会话）
+ *   POST /remote-agent/api/dsh/session-cancel                {sessionId} interrupt a busy attached agent
  *   GET  /remote-agent/api/dsh/active                        phone-created live agents + busy/error state
  *   GET  /remote-agent/api/dsh/model                          current default model selection
  *   GET  /remote-agent/api/status                        dsh online heartbeat {uptimeSec, activeCount, model, now} (v34)
@@ -43,6 +43,13 @@ import readline from "node:readline";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
+
+// R39: 与 dsh-llm createUserMessage 对齐——为用户消息补稳定 id（brandString 运行时为恒等）。
+// 不补 id 时，持久化日志重放校验会抛 "user/message ... lacks an identified message"，
+// 导致该会话后续事件读取直接 500（曾见聊天 6074ba6b index 8、你好啊 4274504e index 177）。
+function createUserMessage(content, source) {
+  return Object.freeze({ id: randomUUID(), role: "user", content, source });
+}
 
 const REPORTS_PATH = "F:\\llm_hub\\logs\\agent_reports.jsonl";
 const REPORTS_TAIL = 100;
@@ -277,6 +284,62 @@ function interruptAgent(agent) {
     }
   }
   return Promise.resolve(null);
+}
+
+/**
+ * R39 懒挂载：把任意可见会话挂进 liveAgents。
+ * 1) 进程内已有活跃 agent（如桌面 web 正开着该会话）→ 直接复用其 Agent
+ *    （借用，不持有 handle，不能 dispose）；
+ * 2) 否则 agents.resume() 从持久化存储重建 agent（桌面已关闭、或 dsh 重启
+ *    后的手机会话，都走这条路恢复）。
+ * 返回 { rec } 或 { status, error }。
+ */
+async function attachAgent(ctx, sessionId) {
+  const agents = svc(ctx, "agents");
+  if (!agents) return { status: 503, error: "agents 服务不可用" };
+  try {
+    const existing = typeof agents.get === "function" ? agents.get(sessionId) : null;
+    if (existing && typeof existing.followup === "function") {
+      const rec = {
+        handle: null,
+        agent: existing,
+        title: "",
+        createdAt: new Date().toISOString(),
+        lastPromptAt: null,
+        busy: false,
+        error: "",
+      };
+      liveAgents.set(sessionId, rec);
+      log("attach: reused live agent " + sessionId);
+      return { rec };
+    }
+  } catch (_) {}
+  try {
+    const handle = await agents.resume({ resumeSessionId: sessionId });
+    const agent = handle && handle.agent;
+    if (!agent || typeof agent.followup !== "function") {
+      try {
+        if (handle && typeof handle.dispose === "function") await handle.dispose();
+      } catch (_) {}
+      return { status: 409, error: "会话恢复失败（句柄异常）" };
+    }
+    const rec = {
+      handle,
+      agent,
+      title: "",
+      createdAt: new Date().toISOString(),
+      lastPromptAt: null,
+      busy: false,
+      error: "",
+    };
+    liveAgents.set(sessionId, rec);
+    log("attach: resumed persisted session " + sessionId);
+    return { rec };
+  } catch (e) {
+    const msg = String((e && e.message) || e);
+    log("attach: resume failed " + sessionId + " " + msg);
+    return { status: 409, error: "会话恢复失败：" + msg };
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -803,6 +866,7 @@ function apply(ctx) {
           }
           liveAgents.set(sessionId, {
             handle,
+            agent,
             title: String(body.title || "").slice(0, 80),
             createdAt: new Date().toISOString(),
             lastPromptAt: new Date().toISOString(),
@@ -820,10 +884,9 @@ function apply(ctx) {
           }
           rec.busy = true;
           try {
-            agent.followup({
-              content: [{ type: "text", text: prompt }],
-              source: { kind: "user" },
-            });
+            agent.followup(
+              createUserMessage([{ type: "text", text: prompt }], { kind: "user" })
+            );
           } catch (e) {
             rec.busy = false;
             rec.error = String((e && e.message) || e);
@@ -886,27 +949,38 @@ function apply(ctx) {
           send(res, 400, { ok: false, error: "sessionId 与 prompt 均必填" });
           return;
         }
-        const rec = liveAgents.get(sessionId);
-        if (!rec || !rec.handle || !rec.handle.agent) {
-          send(res, 409, {
-            ok: false,
-            error: "该会话不是本机手机入口创建的活跃会话（或已随 dsh 重启丢失）",
-          });
-          return;
+        let rec = liveAgents.get(sessionId);
+        if (!rec || !rec.agent) {
+          // R39 懒挂载：手机可直接续聊任意可见会话，不再限于手机入口创建
+          const wsIdx = readWorkspaceIndex();
+          let liveNow = false;
+          try {
+            const ss = svc(ctx, "sessions");
+            if (ss && typeof ss.get === "function") liveNow = !!ss.get(sessionId);
+          } catch (_) {}
+          if (!isSessionVisible(sessionId, { live: liveNow }, wsIdx)) {
+            send(res, 404, { ok: false, error: "该会话已删除或不在当前工作区，无法续聊" });
+            return;
+          }
+          const attached = await attachAgent(ctx, sessionId);
+          if (!attached.rec) {
+            send(res, attached.status || 409, { ok: false, error: attached.error });
+            return;
+          }
+          rec = attached.rec;
         }
         if (rec.busy) {
           send(res, 409, { ok: false, error: "会话忙（上一轮未完成），可先取消" });
           return;
         }
         try {
-          const agent = rec.handle.agent;
+          const agent = rec.agent;
           rec.busy = true;
           rec.error = "";
           rec.lastPromptAt = new Date().toISOString();
-          agent.followup({
-            content: [{ type: "text", text: prompt }],
-            source: { kind: "user" },
-          });
+          agent.followup(
+            createUserMessage([{ type: "text", text: prompt }], { kind: "user" })
+          );
           Promise.resolve()
             .then(() => agent.whenIdle())
             .then(
@@ -954,11 +1028,11 @@ function apply(ctx) {
         }
         const sessionId = String(body.sessionId || "");
         const rec = liveAgents.get(sessionId);
-        if (!rec || !rec.handle || !rec.handle.agent) {
-          send(res, 404, { ok: false, error: "活跃会话不存在" });
+        if (!rec || !rec.agent) {
+          send(res, 404, { ok: false, error: "活跃会话不存在（手机侧尚未挂载，无可取消的生成）" });
           return;
         }
-        const how = await interruptAgent(rec.handle.agent);
+        const how = await interruptAgent(rec.agent);
         rec.error = how ? "" : "未找到可用的中断方法";
         send(res, 200, { ok: true, data: { sessionId, interruptedVia: how } });
       },
