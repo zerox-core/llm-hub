@@ -10,6 +10,15 @@ $mutex = New-Object System.Threading.Mutex($false, 'Global\DshHubWatchdog')
 if (-not $mutex.WaitOne(0)) { exit 0 }
 try {
 
+# --- 0) dsh restart requested by hub scan (R42): pool set changed -> relaunch to inject new HUB_POOL_KEY_* env ---
+$rstFlag = 'F:\llm_hub\logs\.dsh_restart_needed'
+if (Test-Path $rstFlag) {
+  Remove-Item $rstFlag -Force
+  $dshR = @(Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object { $_.CommandLine -like '*dsh*bin.js*' })
+  foreach ($p in $dshR) { Stop-Process -Id $p.ProcessId -Force }
+  W ("dsh restart requested by hub scan: killed {0}, relaunch below" -f $dshR.Count)
+}
+
 # --- 1) dsh: exactly one, owning port 3080 ---
 $dsh = @(Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object { $_.CommandLine -like '*dsh*bin.js*' })
 if ($dsh.Count -eq 0) {
@@ -102,6 +111,21 @@ if ($loops.Count -gt 1) {
   $keep = ($ssh | Sort-Object ProcessId | Select-Object -First 1).ProcessId
   foreach ($p in $ssh) { if ($p.ProcessId -ne $keep) { Stop-Process -Id $p.ProcessId -Force } }
   W ("dedupe ssh: kept {0}, killed {1}" -f $keep, ($ssh.Count - 1))
+}
+
+# --- 5) diary backend (AI_room uvicorn :8000): at least one listener ---
+$diaryListen = @(Get-NetTCPConnection -State Listen -LocalPort 8000)
+if ($diaryListen.Count -eq 0) {
+  W 'diary backend not listening on 8000 -> starting via F:\\AI_room\\start_backend.py'
+  Start-Process py -WindowStyle Hidden -ArgumentList 'F:\\AI_room\\start_backend.py'
+}
+
+
+# --- 6) hub->dsh model scan (R42): refresh settings.yaml model lists from live hub pools ---
+$scanLock = 'F:\llm_hub\logs\.dsh_hub_scan.lock'
+$scanFresh = (Test-Path $scanLock) -and ((Get-Item $scanLock).LastWriteTime -gt (Get-Date).AddMinutes(-10))
+if (-not $scanFresh) {
+  Start-Process py -WindowStyle Hidden -ArgumentList 'F:\llm_hub\dsh_hub_scan.py'
 }
 
 } finally {
