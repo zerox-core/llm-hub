@@ -14,3 +14,6 @@ _*.ps1
 
 # R31: 控制台令牌入口 URL（含敏感 token，禁止入库）
 remote_console_url.txt
+
+# R32: 控制台手机会话持久名单（运行时状态，不入库）
+remote_console_sessions.json

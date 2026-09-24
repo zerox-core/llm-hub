@@ -177,6 +177,73 @@ function defaultCwd() {
 /** Phone-created live agents: sessionId → tracking record. */
 const liveAgents = new Map();
 
+/* ------------------------------------------------------------------ */
+/* R32: 工作区/已删除会话过滤 + 控制台会话持久名单                      */
+/* ------------------------------------------------------------------ */
+/* dsh 界面删除的会话记在 workspace.json 的 global.archivedSessionIds，
+ * 界面列表只显示当前工作区的 sessionIds；而 sessionQuery.listSessions()
+ * 返回磁盘语料全量、不做任何过滤。控制台按 UI 语义自行对齐：
+ * 已归档（已删除）一律不显示；非当前工作区的孤儿持久会话不显示；
+ * 当前工作区会话 / 正在运行（live）/ 控制台创建的会话正常显示。 */
+const WS_JSON = "F:\\deepseek-harness\\home\\storages\\workspace.json";
+let _wsCache = { mtimeMs: -1, data: null };
+function readWorkspaceIndex() {
+  try {
+    const st = fs.statSync(WS_JSON);
+    if (_wsCache.data && _wsCache.mtimeMs === st.mtimeMs) return _wsCache.data;
+    const raw = JSON.parse(fs.readFileSync(WS_JSON, "utf8"));
+    const g = (raw && raw.global) || {};
+    const wsTable = ((raw && raw.tables) || {}).workspaces || {};
+    let active = null;
+    for (const k of Object.keys(wsTable)) {
+      const w = wsTable[k];
+      if (!active || String(w.updatedAt || "") > String(active.updatedAt || "")) active = w;
+    }
+    const data = {
+      archived: new Set((g.archivedSessionIds || []).map(String)),
+      activeIds: new Set((((active && active.sessionIds) || []).map(String))),
+      activePath: String((active && active.path) || ""),
+    };
+    _wsCache = { mtimeMs: st.mtimeMs, data };
+    return data;
+  } catch (_) {
+    return null; /* 索引不可读时不过滤（fail-open），避免误杀全部会话 */
+  }
+}
+function isSessionVisible(id, flags, ws) {
+  if (!id) return false;
+  if (!ws) return true;
+  if (ws.archived.has(id)) return false;
+  return ws.activeIds.has(id) || !!((flags && flags.live) || isPhoneCreated(id));
+}
+
+/* R32: 控制台创建的会话持久名单——dsh 重启后仍能在手机端列出/读取。 */
+const PHONE_SESSIONS_FILE = "F:\\llm_hub\\remote_console_sessions.json";
+let _phoneIds = null;
+function phoneIds() {
+  if (_phoneIds) return _phoneIds;
+  try {
+    _phoneIds = new Set(JSON.parse(fs.readFileSync(PHONE_SESSIONS_FILE, "utf8")).map(String));
+  } catch (_) {
+    _phoneIds = new Set();
+  }
+  return _phoneIds;
+}
+function isPhoneCreated(id) {
+  const k = String(id || "");
+  return liveAgents.has(k) || phoneIds().has(k);
+}
+function notePhoneSession(id) {
+  try {
+    const ids = phoneIds();
+    ids.add(String(id || ""));
+    fs.writeFileSync(PHONE_SESSIONS_FILE, JSON.stringify([...ids], null, 1), "utf8");
+    _phoneIds = ids;
+  } catch (e) {
+    log("notePhoneSession failed: " + String((e && e.message) || e));
+  }
+}
+
 function publicAgentEntry(sessionId, rec) {
   return {
     sessionId,
@@ -468,7 +535,14 @@ function apply(ctx) {
           let limit = Number(url.searchParams.get("limit") || 40);
           if (!Number.isFinite(limit) || limit < 1) limit = 40;
           if (limit > 200) limit = 200;
-          const records = await sq.listSessions();
+          const wsIdx = readWorkspaceIndex();
+          const all = await sq.listSessions();
+          const records = wsIdx
+            ? all.filter((r) => {
+                const id = String((r && r.header && r.header.id) || "");
+                return isSessionVisible(id, { live: !!(r && r.live) }, wsIdx);
+              })
+            : all;
           const rows = [];
           for (const r of records.slice(0, limit)) {
             const h = (r && r.header) || {};
@@ -487,7 +561,7 @@ function apply(ctx) {
               cwd: h.cwd || "",
               createdAt: h.createdAt || null,
               updatedAt: h.updatedAt || null,
-              phoneCreated: liveAgents.has(String(h.id || "")),
+              phoneCreated: isPhoneCreated(String(h.id || "")),
             });
           }
           send(res, 200, { ok: true, data: rows });
@@ -518,6 +592,16 @@ function apply(ctx) {
           const sq = svc(ctx, "sessionQuery");
           if (!sq) {
             send(res, 503, { ok: false, error: "sessionQuery 服务不可用" });
+            return;
+          }
+          const wsIdx = readWorkspaceIndex();
+          let liveNow = false;
+          try {
+            const ss = svc(ctx, "sessions");
+            if (ss && typeof ss.get === "function") liveNow = !!ss.get(sid);
+          } catch (_) {}
+          if (!isSessionVisible(sid, { live: liveNow }, wsIdx)) {
+            send(res, 404, { ok: false, error: "该会话已删除或不在当前工作区，无法读取" });
             return;
           }
           // listEvents() returns payload-free summaries; readSurface() carries the
@@ -691,6 +775,7 @@ function apply(ctx) {
             busy: false,
             error: "",
           });
+          notePhoneSession(sessionId);
           const rec = liveAgents.get(sessionId);
           // rename via sessionTitle (optional)
           const sessionTitle = svc(ctx, "sessionTitle");
