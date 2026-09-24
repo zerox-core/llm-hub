@@ -472,7 +472,11 @@
         timeEl.setAttribute('data-hub-zone-time', t);
         titleEl.appendChild(timeEl);
       }
-      var want = (child && sessionTitleOf(child)) || '新会话';
+      // R28b（2026-09-24）：分区行主文案优先用后端 projcache 的真实会话标题
+      // （与主面板标题同源，用户拍板「标题同步到左侧」）；DOM 子行常因懒渲染读不到，
+      // 降为次选；最后兜底「新会话」。
+      var zw = zoneByTitle[t] || {};
+      var want = zw.sessionTitle || (child && sessionTitleOf(child)) || '新会话';
       if (nameEl.textContent !== want) { nameEl.textContent = want; }
       var ttEl = titleEl.querySelector('[data-hub-zone-time]');
       var tt = zoneTimeText(t);

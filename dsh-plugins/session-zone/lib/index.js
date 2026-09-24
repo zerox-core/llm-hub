@@ -161,6 +161,25 @@ function readBody(req) {
   });
 }
 
+/** 2026-09-24：从 projcache 元数据读会话标题（record.rows.title.val，回退 titleInput.val.first）。
+ *  供侧栏分区行同步显示主面板的真实会话标题；读不到返回 null。 */
+function readSessionTitle(sessionId) {
+  try {
+    const p = path.join(PROJCACHE_DIR, sessionId + ".json");
+    if (!fs.existsSync(p)) return null;
+    const j = JSON.parse(fs.readFileSync(p, "utf8"));
+    const rows = j && j.record && j.record.rows;
+    if (!rows) return null;
+    const t = rows.title && rows.title.val;
+    if (typeof t === "string" && t.trim()) return t.trim();
+    const f = rows.titleInput && rows.titleInput.val && rows.titleInput.val.first;
+    if (typeof f === "string" && f.trim()) return f.trim();
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 function apply(ctx) {
   const send = (res, code, obj) => {
     res.writeHead(code, {
@@ -190,14 +209,24 @@ function apply(ctx) {
     return ctx.workspaceRegistry
       .list()
       .filter((w) => isUnderZone(w.path))
-      .map((w) => ({
-        id: String(w.id),
-        path: w.path,
-        title: w.title,
-        createdAt: w.createdAt,
-        sessionIds: w.sessionIds.map((s) => String(s)),
-        project: resolveProject(byId, attr[String(w.id)]),
-      }));
+      .map((w) => {
+        const sessionIds = w.sessionIds.map((s) => String(s));
+        // 2026-09-24：取第一个有标题的会话标题，供侧栏分区行同步显示
+        let sessionTitle = null;
+        for (const sid of sessionIds) {
+          sessionTitle = readSessionTitle(sid);
+          if (sessionTitle) break;
+        }
+        return {
+          id: String(w.id),
+          path: w.path,
+          title: w.title,
+          createdAt: w.createdAt,
+          sessionIds,
+          sessionTitle,
+          project: resolveProject(byId, attr[String(w.id)]),
+        };
+      });
   };
 
   ctx.effect(() =>
