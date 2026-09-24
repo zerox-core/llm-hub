@@ -15,6 +15,7 @@
  *   POST /remote-agent/api/dsh/session-cancel                {sessionId} interrupt a busy phone-created agent
  *   GET  /remote-agent/api/dsh/active                        phone-created live agents + busy/error state
  *   GET  /remote-agent/api/dsh/model                          current default model selection
+ *   GET  /remote-agent/api/status                        dsh online heartbeat {uptimeSec, activeCount, model, now} (v34)
  *
  * Security: service ids are whitelist-only; start/stop invoke fixed scripts with
  * array-arg spawn (no shell interpolation of request input); no free-form command surface.
@@ -27,6 +28,12 @@
  *   (remote_console_token in F:\llm_hub\data.json) via `Authorization: Bearer`
  *   or `?token=` — FAIL-CLOSED: unconfigured token locks all APIs (503).
  *   The page itself carries no secrets and stays ungated.
+ *
+ * R34 (2026-09-24):
+ *   GET /remote-agent/api/status — heartbeat for the console page (8s poll);
+ *   console.html v34 restyled to a native-app look; the services tab was removed
+ *   from the page (service APIs remain token-gated but are no longer used by it);
+ *   the page auto-detects dsh online/offline and self-recovers without user input.
  */
 
 import net from "node:net";
@@ -666,6 +673,33 @@ function apply(ctx) {
         } catch (e) {
           send(res, 500, { ok: false, error: String((e && e.message) || e) });
         }
+      },
+    })
+  );
+
+  ctx.effect(() =>
+    ctx.webServer.register({
+      kind: "exact",
+      path: "/remote-agent/api/status",
+      handler: async (req, res) => {
+        if (unauthorized(req, res)) return;
+        let model = { provider: "", model: "" };
+        try {
+          const dm = svc(ctx, "agentDefaultModel");
+          if (dm && typeof dm.currentSelection === "function") {
+            const sel = dm.currentSelection();
+            model = { provider: (sel && sel.provider) || "", model: (sel && sel.model) || "" };
+          }
+        } catch (_) {}
+        send(res, 200, {
+          ok: true,
+          data: {
+            uptimeSec: Math.floor(process.uptime()),
+            activeCount: liveAgents.size,
+            model,
+            now: new Date().toISOString(),
+          },
+        });
       },
     })
   );
