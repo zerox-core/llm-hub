@@ -64,10 +64,29 @@ def log_call(entry):
 
 # ---------------- 用户级 key 配额（R28 2026-09-24） ----------------
 # hub_keys 条目可带 pool_id（绑定号池 = 该 key 仅此池范围）与 quota
-# （rpm / daily_tokens / max_tokens）。计数器为进程内存级：hub 重启后当日
-# token 计数清零（v1 取舍；rpm 基本不受影响），需要精确账本时以 log_call 为准。
+# （rpm / daily_tokens / max_tokens）。计数器落盘 key_usage.json（与 data.json
+# 同目录，云端可经 HUB_KEY_USAGE_FILE 指到挂载卷）：hub 重启后当日 token 计数
+# 不清零；rpm 分钟窗随重启保留。精确账本仍以 log_call 为准。
 
 _key_usage = {}
+KEY_USAGE_FILE = Path(os.environ.get("HUB_KEY_USAGE_FILE") or (DATA_FILE.parent / "key_usage.json"))
+try:
+    _ku = json.loads(KEY_USAGE_FILE.read_text(encoding="utf-8") or "{}")
+    if isinstance(_ku, dict):
+        _key_usage.update(_ku)
+except Exception:
+    pass
+
+
+def _save_key_usage():
+    """原子写盘（tmp + os.replace），失败不影响主流程。"""
+    try:
+        tmp = str(KEY_USAGE_FILE) + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(_key_usage, f)
+        os.replace(tmp, KEY_USAGE_FILE)
+    except Exception:
+        pass
 
 
 def _key_id_of(hk):
@@ -99,6 +118,7 @@ def _key_quota_check(hk, body):
             return 429, {"message": "该 key 的当日 token 额度（%d）已用完，次日自动恢复。" % daily,
                          "type": "hub_key_daily_tokens_exhausted"}
         e["count"] = int(e.get("count") or 0) + 1
+        _save_key_usage()
     cap = int(q.get("max_tokens") or 0)
     if cap:
         cur = body.get("max_tokens")
@@ -122,6 +142,7 @@ def _key_quota_record(hk, total_tokens):
         e = _key_usage.get(_key_id_of(hk))
         if e is not None:
             e["tokens"] = int(e.get("tokens") or 0) + t
+            _save_key_usage()
 
 
 def _key_usage_view(hk):
@@ -2312,11 +2333,13 @@ def _anth_err(status, message):
                         content={"type": "error", "error": {"type": "api_error", "message": message}})
 
 
-async def _anth_forward_stream(p, body, model, model_requested):
+async def _anth_forward_stream(p, body, model, model_requested, hk=None):
     """流式：上游 OpenAI SSE -> Anthropic SSE 事件序列"""
     b = dict(body)
     b["model"] = model
     b["stream"] = True
+    if hk is not None and int((hk.get("quota") or {}).get("daily_tokens") or 0):
+        b["stream_options"] = {"include_usage": True}
     headers = {"Authorization": "Bearer " + p["api_key"], "Content-Type": "application/json"}
     url = p["base_url"].rstrip("/") + "/chat/completions"
     t0 = time.time()
@@ -2331,6 +2354,8 @@ async def _anth_forward_stream(p, body, model, model_requested):
         next_idx = 0
         stop_reason = "end_turn"
         out_tokens = 0
+        in_tokens = 0
+        tot_tokens = 0
 
         def sse(ev, data):
             return ("event: %s\ndata: %s\n\n" % (ev, json.dumps(data, ensure_ascii=False))).encode()
@@ -2358,7 +2383,10 @@ async def _anth_forward_stream(p, body, model, model_requested):
                 except Exception:
                     continue
                 if isinstance(chunk.get("usage"), dict):
-                    out_tokens = chunk["usage"].get("completion_tokens") or out_tokens
+                    _u = chunk["usage"]
+                    out_tokens = _u.get("completion_tokens") or out_tokens
+                    in_tokens = _u.get("prompt_tokens") or in_tokens
+                    tot_tokens = _u.get("total_tokens") or tot_tokens
                 ch = (chunk.get("choices") or [{}])[0]
                 delta = ch.get("delta") or {}
                 fr = ch.get("finish_reason")
@@ -2408,6 +2436,8 @@ async def _anth_forward_stream(p, body, model, model_requested):
                       "ok": resp.status_code == 200, "status": resp.status_code,
                       "latency_ms": ms, "stream": True,
                       "error": None if resp.status_code == 200 else "stream HTTP %d" % resp.status_code})
+            if hk is not None and (tot_tokens or in_tokens or out_tokens):
+                _key_quota_record(hk, tot_tokens or ((in_tokens or 0) + (out_tokens or 0)))
             await resp.aclose()
             await client.aclose()
 
@@ -2499,7 +2529,7 @@ async def anth_messages(req: Request):
 
     if stream:
         p0, m0 = scoped[0]
-        return await _anth_forward_stream(p0, obody, m0, model)
+        return await _anth_forward_stream(p0, obody, m0, model, hk=hk)
 
     last = None
     first_model = scoped[0][1]
