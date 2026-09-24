@@ -69,6 +69,101 @@ def log_call(entry):
         pass
 
 
+# ---------------- 用户级 key 配额（R28 2026-09-24） ----------------
+# hub_keys 条目可带 pool_id（绑定号池 = 该 key 仅此池范围）与 quota
+# （rpm / daily_tokens / max_tokens）。计数器为进程内存级：hub 重启后当日
+# token 计数清零（v1 取舍；rpm 基本不受影响），需要精确账本时以 log_call 为准。
+
+_key_usage = {}
+
+
+def _key_id_of(hk):
+    return hk.get("id") or hk.get("key") or "?"
+
+
+def _key_quota_check(hk, body):
+    """None = 放行；否则 (status, error_dict)。会按需把 body['max_tokens'] 钳到 quota 上限。"""
+    q = hk.get("quota") or {}
+    if not q:
+        return None
+    kid = _key_id_of(hk)
+    with _lock:
+        e = _key_usage.setdefault(kid, {})
+        day = time.strftime("%Y-%m-%d")
+        if e.get("day") != day:
+            e["day"] = day
+            e["tokens"] = 0
+        minute = time.strftime("%Y-%m-%d %H:%M")
+        if e.get("minute") != minute:
+            e["minute"] = minute
+            e["count"] = 0
+        rpm = int(q.get("rpm") or 0)
+        if rpm and int(e.get("count") or 0) >= rpm:
+            return 429, {"message": "超出该 key 的每分钟调用上限（%d 次/分钟），请稍后再试。" % rpm,
+                         "type": "hub_key_rpm_limited"}
+        daily = int(q.get("daily_tokens") or 0)
+        if daily and int(e.get("tokens") or 0) >= daily:
+            return 429, {"message": "该 key 的当日 token 额度（%d）已用完，次日自动恢复。" % daily,
+                         "type": "hub_key_daily_tokens_exhausted"}
+        e["count"] = int(e.get("count") or 0) + 1
+    cap = int(q.get("max_tokens") or 0)
+    if cap:
+        cur = body.get("max_tokens")
+        try:
+            cur_i = int(cur) if cur is not None else None
+        except Exception:
+            cur_i = None
+        if cur_i is None or cur_i > cap:
+            body["max_tokens"] = cap
+    return None
+
+
+def _key_quota_record(hk, total_tokens):
+    if not hk or total_tokens is None:
+        return
+    try:
+        t = int(total_tokens)
+    except Exception:
+        return
+    with _lock:
+        e = _key_usage.get(_key_id_of(hk))
+        if e is not None:
+            e["tokens"] = int(e.get("tokens") or 0) + t
+
+
+def _key_usage_view(hk):
+    with _lock:
+        e = dict(_key_usage.get(_key_id_of(hk)) or {})
+    return {"key_id": _key_id_of(hk), "name": hk.get("name"),
+            "pool_id": hk.get("pool_id") or "", "quota": hk.get("quota") or {},
+            "today": {"day": e.get("day"), "tokens_used": int(e.get("tokens") or 0)},
+            "this_minute": {"minute": e.get("minute"), "requests": int(e.get("count") or 0)}}
+
+
+_QUOTA_FIELDS = ("rpm", "daily_tokens", "max_tokens")
+
+
+def _norm_quota(q):
+    if q is None:
+        return {}
+    if not isinstance(q, dict):
+        raise HTTPException(400, "quota 必须是对象，字段：rpm / daily_tokens / max_tokens")
+    out = {}
+    for f in _QUOTA_FIELDS:
+        v = q.get(f)
+        if v is None:
+            continue
+        try:
+            v = int(v)
+        except Exception:
+            raise HTTPException(400, "quota.%s 必须是整数" % f)
+        if v < 0:
+            raise HTTPException(400, "quota.%s 不能为负" % f)
+        if v:
+            out[f] = v
+    return out
+
+
 def read_logs(limit=200):
     """最新在前。"""
     if not LOG_FILE.exists():
@@ -500,11 +595,48 @@ def model_disabled(p, model):
 
 
 def find_model_provider(d, model):
-    """指定模型 → 第一个拥有该模型的渠道；都没有则 None。"""
+    """指定模型 → 第一个拥有该模型的渠道；都没有则 None。（保留作兼容，新逻辑走 resolve_model）"""
     for p in d["providers"]:
         if model in (p.get("models") or []):
             return p
     return None
+
+
+def find_model_providers(d, model):
+    """指定模型 → 拥有该模型的全部渠道（渠道隔离的基础）。"""
+    return [p for p in d["providers"] if model in (p.get("models") or [])]
+
+
+def resolve_model(d, model, scope=None, extra_cats=None):
+    """模型 → 渠道 的隔离解析（2026-09-24 拍板：不同上游的同名模型不做自动归并/挑选）。
+    - 支持「渠道名::模型名 / 渠道id::模型名」限定写法，精确落到该渠道；
+    - 裸名只在唯一渠道（或号池 scope 内唯一）时放行；
+    - 多渠道同名 → (None, 裸名, (409, 提示))，不做静默自动挑选；
+    - 限定写法渠道存在但无该模型 / 渠道不存在 → (None, 裸名, (404, 提示))；
+    - 裸名无任何渠道拥有 → (None, 裸名, None)，由调用方按旧逻辑兜底。
+    返回 (provider|None, 裸模型名, (status, message)|None)。"""
+    raw = str(model or "").strip()
+    if "::" in raw:
+        sel, _, bare = raw.partition("::")
+        sel, bare = sel.strip(), bare.strip()
+        for p in d["providers"]:
+            if sel in (p.get("id"), p.get("name")):
+                if bare in (p.get("models") or []):
+                    return p, bare, None
+                return None, bare, (404, "渠道「%s」没有模型 %s。限定写法：渠道名::模型名。" % (p.get("name"), bare))
+        return None, bare, (404, "找不到渠道：%s。限定写法：渠道名::模型名。" % sel)
+    provs = find_model_providers(d, raw)
+    if scope is not None:
+        allowed = pool_scope_set(d, scope, extra_cats=extra_cats)
+        provs = [p for p in provs if (p["id"], raw) in allowed]
+    if len(provs) > 1:
+        who = "、".join("%s::%s" % (p.get("name") or p.get("id"), raw) for p in provs)
+        return None, raw, (409,
+            "模型 %s 同时存在于多个渠道（%s）。不同上游的同名模型不是同一个模型，已停止自动挑选；"
+            "请改用「渠道名::模型名」或请求头 X-Hub-Provider 指定渠道。" % (raw, who))
+    if provs:
+        return provs[0], raw, None
+    return None, raw, None
 
 
 def pool_scope_candidates(d, pl, extra_cats=None):
@@ -1133,16 +1265,25 @@ class HarnessModelIn(BaseModel):
 
 
 def _harness_options(d):
-    """可选模型 = 各渠道号池中已勾选、且满足免费额度/AG 组策略的可对话模型。"""
+    """可选模型 = 各渠道号池中已勾选、且满足免费额度/AG 组策略的可对话模型。
+    渠道隔离（2026-09-24）：同名模型存在于多个渠道时，渲染为「渠道名::模型名」限定写法。"""
+    holder_count = {}
+    for p in d["providers"]:
+        if not p.get("base_url"):
+            continue
+        for m in (p.get("models") or []):
+            holder_count[m] = holder_count.get(m, 0) + 1
     opts = []
     for p in d["providers"]:
         if not p.get("base_url"):
             continue
         ms = chat_candidates(d, p)
         if ms:
+            ms_out = [("%s::%s" % (p.get("name") or p["id"], m)
+                       if holder_count.get(m, 0) > 1 else m) for m in ms]
             opts.append({"provider_id": p["id"],
                          "provider_name": p.get("name") or p["id"],
-                         "models": ms})
+                         "models": ms_out})
     return opts
 
 
@@ -1158,13 +1299,15 @@ def set_harness_model(inp: HarnessModelIn):
     d = load_data()
     m = (inp.model or "auto").strip()
     if m != "auto":
-        p = find_model_provider(d, m)
+        p, mb, me = resolve_model(d, m)
+        if me:
+            raise HTTPException(me[0], me[1])
         if p is None:
             raise HTTPException(404, "模型不在任何渠道：%s" % m)
-        if model_disabled(p, m):
-            raise HTTPException(400, "模型未在号池中勾选：%s" % m)
-        if model_category(m) not in CHAT_CATS:
-            raise HTTPException(400, "该模型不是可对话模型：%s" % m)
+        if model_disabled(p, mb):
+            raise HTTPException(400, "模型未在号池中勾选：%s" % mb)
+        if model_category(mb) not in CHAT_CATS:
+            raise HTTPException(400, "该模型不是可对话模型：%s" % mb)
     d["harness_model"] = m
     save_data(d)
     return {"ok": True, "model": m}
@@ -1752,6 +1895,15 @@ def _require_hub_key(d, req):
         return None
     for hk in d.get("hub_keys") or []:
         if hk.get("key") and key == hk["key"]:
+            pid = (hk.get("pool_id") or "").strip()
+            if pid:
+                for pl in d.get("pools") or []:
+                    if pl.get("id") == pid:
+                        req.state.hub_key_entry = hk
+                        return pl
+                raise HTTPException(status_code=403,
+                                    detail="该接入 key 绑定的号池（%s）已不存在，请联系发放方。" % pid)
+            req.state.hub_key_entry = hk
             return None
     if key:
         for pl in d.get("pools") or []:
@@ -1769,21 +1921,31 @@ def hub_models(req: Request):
     scope = _require_hub_key(d, req)
     data = [{"id": "auto", "object": "model", "owned_by": "llm-hub"}]
     seen = {"auto"}
+    # 渠道隔离（2026-09-24）：唯一渠道的模型出裸 id；同名多渠道各出一条「渠道名::模型名」限定 id，不再归并。
     if scope is not None:
-        for p, m in pool_scope_candidates(d, scope, extra_cats={"图像生成"}):
+        pairs = pool_scope_candidates(d, scope, extra_cats={"图像生成"})
+    else:
+        pairs = [(p, m) for p in d["providers"]
+                 for m in chat_candidates(d, p, extra_cats={"图像生成"})]
+    holders = {}
+    for p, m in pairs:
+        holders.setdefault(m, []).append(p)
+    for m, ps in holders.items():
+        if len(ps) == 1:
             if m in seen:
                 continue
             seen.add(m)
             data.append({"id": m, "object": "model",
-                         "owned_by": scope.get("name") or "pool"})
-        return {"object": "list", "data": data}
-    for p in d["providers"]:
-        for m in chat_candidates(d, p, extra_cats={"图像生成"}):
-            if m in seen:
-                continue
-            seen.add(m)
-            data.append({"id": m, "object": "model",
-                         "owned_by": p.get("name") or p.get("type") or "provider"})
+                         "owned_by": (scope.get("name") if scope is not None else None)
+                         or ps[0].get("name") or ps[0].get("type") or "provider"})
+        else:
+            for p in ps:
+                qid = "%s::%s" % (p.get("name") or p.get("id"), m)
+                if qid in seen:
+                    continue
+                seen.add(qid)
+                data.append({"id": qid, "object": "model",
+                             "owned_by": p.get("name") or p.get("type") or "provider"})
     return {"object": "list", "data": data}
 
 
@@ -1799,6 +1961,15 @@ async def hub_chat(req: Request):
     body = await req.json()
     d = load_data()
     scope = _require_hub_key(d, req)
+    hk = getattr(req.state, "hub_key_entry", None)
+    if hk is not None:
+        rl = _key_quota_check(hk, body)
+        if rl is not None:
+            log_call({"source": "proxy", "provider": None,
+                      "model_requested": body.get("model") or "auto", "model_used": None,
+                      "ok": False, "blocked": True, "latency_ms": 0,
+                      "error": "key 配额拦截：" + rl[1]["type"]})
+            return JSONResponse(status_code=rl[0], content={"error": rl[1]})
     model = body.get("model") or "auto"
     stream = bool(body.get("stream"))
 
@@ -1807,19 +1978,21 @@ async def hub_chat(req: Request):
     if model == "auto" and not req.headers.get("x-hub-provider") and scope is None:
         pin = (d.get("harness_model") or "auto").strip()
         if pin and pin != "auto":
-            _pp = find_model_provider(d, pin)
-            if _pp is None or model_disabled(_pp, pin):
+            _pp, _pm, _pe = resolve_model(d, pin)
+            if _pe or _pp is None or model_disabled(_pp, _pm):
                 log_call({"source": "proxy", "provider": None,
                           "model_requested": "auto", "model_used": None,
                           "ok": False, "blocked": True, "latency_ms": 0,
                           "error": "锁定模型不可用：" + pin})
                 return JSONResponse(status_code=409, content={"error": {
-                    "message": "Harness 锁定模型 %s 已不可用（被删除或未在号池勾选）。请到 Harness 页重新选择，或切回 Auto。" % pin,
+                    "message": "Harness 锁定模型 %s 已不可用（被删除、未在号池勾选或同名多渠道冲突）。请到 Harness 页重新选择（同名模型用 渠道名::模型名 锁定），或切回 Auto。" % pin,
                     "type": "hub_pin_invalid"}})
             model = pin
 
     if req.headers.get("x-hub-provider"):
         p = _pick_provider(d, req)
+        if model != "auto" and "::" in model:
+            model = model.partition("::")[2].strip()
         scoped = [(p, m) for m in (chat_candidates(d, p) if model == "auto" else [model])]
         if scope is not None:
             allowed = pool_scope_set(d, scope)
@@ -1827,8 +2000,27 @@ async def hub_chat(req: Request):
     elif model == "auto":
         scoped = pool_scope_candidates(d, scope) if scope is not None else all_chat_candidates(d)
     else:
-        p = find_model_provider(d, model)
+        # 渠道隔离：裸名唯一渠道放行；同名多渠道 409（不再自动挑第一个）；限定写法精确落渠道。
+        p, _mb, _me = resolve_model(d, model, scope=scope, extra_cats={"图像生成"})
+        if _me:
+            log_call({"source": "proxy", "provider": None,
+                      "model_requested": model, "model_used": None,
+                      "ok": False, "blocked": True, "latency_ms": 0,
+                      "error": "同名模型隔离拦截：" + model})
+            return JSONResponse(status_code=_me[0], content={"error": {
+                "message": _me[1], "type": "hub_model_ambiguous"}})
+        model = _mb
         if p is None:
+            if scope is not None:
+                if find_model_providers(d, model):
+                    log_call({"source": "proxy", "provider": None,
+                              "model_requested": model, "model_used": None,
+                              "ok": False, "blocked": True, "latency_ms": 0,
+                              "error": "号池范围拦截：" + model})
+                    return JSONResponse(status_code=403, content={"error": {
+                        "message": "模型 %s 不在号池「%s」范围内，已拦截。" % (model, scope.get("name")),
+                        "type": "hub_pool_scope"}})
+                raise HTTPException(404, "模型 %s 不在号池「%s」范围内" % (model, scope.get("name")))
             if scope is not None:
                 raise HTTPException(404, "模型 %s 不在号池「%s」范围内" % (model, scope.get("name")))
             if not d["providers"]:
@@ -1895,7 +2087,7 @@ async def hub_chat(req: Request):
     if stream:
         # 流式不做轮询，直接用第一个候选透传
         p0, m0 = scoped[0]
-        return await _forward_stream(p0, body, m0, model_requested=model)
+        return await _forward_stream(p0, body, m0, model_requested=model, hk=hk)
 
     last = None
     cooled_groups = set()
@@ -1920,6 +2112,7 @@ async def hub_chat(req: Request):
                   "error": None if code == 200 else
                            (json.dumps(resp, ensure_ascii=False)[:300] if isinstance(resp, dict) else str(resp)[:300])})
         if code == 200:
+            _key_quota_record(hk, u.get("total_tokens"))
             return JSONResponse(content=resp,
                                 headers={"X-Hub-Model": m, "X-Hub-Provider": p.get("id")})
         last = (p, m, code, resp)
@@ -1958,9 +2151,14 @@ async def _forward_chat(p, body, model):
         return 502, {"error": {"message": "{}: {}".format(type(e).__name__, e)}}, ms
 
 
-async def _forward_stream(p, body, model, model_requested=None):
+async def _forward_stream(p, body, model, model_requested=None, hk=None):
     b = dict(body)
     b["model"] = model
+    # 用户级 key 带每日 token 额度时，让上游在流尾回传 usage，便于记账
+    if hk is not None and int(((hk.get("quota") or {}).get("daily_tokens")) or 0):
+        so = dict(b.get("stream_options") or {})
+        so["include_usage"] = True
+        b["stream_options"] = so
     headers = {"Authorization": "Bearer " + p["api_key"], "Content-Type": "application/json"}
     url = p["base_url"].rstrip("/") + "/chat/completions"
     t0 = time.time()
@@ -1969,8 +2167,11 @@ async def _forward_stream(p, body, model, model_requested=None):
     resp = await client.send(request, stream=True)
 
     async def gen():
+        tail = ""
         try:
             async for chunk in resp.aiter_raw():
+                if hk is not None:
+                    tail = (tail + chunk.decode("utf-8", "replace"))[-4000:]
                 yield chunk
         finally:
             ms = int((time.time() - t0) * 1000)
@@ -1979,6 +2180,10 @@ async def _forward_stream(p, body, model, model_requested=None):
                       "ok": resp.status_code == 200, "status": resp.status_code,
                       "latency_ms": ms, "stream": True,
                       "error": None if resp.status_code == 200 else "stream HTTP %d" % resp.status_code})
+            if hk is not None:
+                mts = re.findall(r'"total_tokens"\s*:\s*(\d+)', tail)
+                if mts:
+                    _key_quota_record(hk, int(mts[-1]))
             await resp.aclose()
             await client.aclose()
 
@@ -1998,6 +2203,15 @@ def _require_hub_key_anth(d, req):
         return None
     for hk in d.get("hub_keys") or []:
         if hk.get("key") and key == hk["key"]:
+            pid = (hk.get("pool_id") or "").strip()
+            if pid:
+                for pl in d.get("pools") or []:
+                    if pl.get("id") == pid:
+                        req.state.hub_key_entry = hk
+                        return pl
+                raise HTTPException(status_code=403,
+                                    detail="该接入 key 绑定的号池（%s）已不存在，请联系发放方。" % pid)
+            req.state.hub_key_entry = hk
             return None
     if key:
         for pl in d.get("pools") or []:
@@ -2220,15 +2434,29 @@ async def anth_messages(req: Request):
     body = await req.json()
     d = load_data()
     scope = _require_hub_key_anth(d, req)
+    hk = getattr(req.state, "hub_key_entry", None)
+    if hk is not None:
+        rl = _key_quota_check(hk, body)
+        if rl is not None:
+            log_call({"source": "proxy-anthropic", "provider": None,
+                      "model_requested": body.get("model") or "auto", "model_used": None,
+                      "ok": False, "blocked": True, "latency_ms": 0,
+                      "error": "key 配额拦截：" + rl[1]["type"]})
+            return _anth_err(rl[0], rl[1]["message"])
     model = body.get("model") or "auto"
-    if find_model_provider(d, model) is None:
-        model = "auto"
+    # 渠道隔离：限定写法解析失败显式报错；裸名多渠道 409；裸名无渠道 → 保留 Claude Code 的 auto 回退。
+    if model != "auto":
+        _p0, _m0, _e0 = resolve_model(d, model)
+        if _e0:
+            return _anth_err(_e0[0], _e0[1])
+        if _p0 is None and "::" not in str(model):
+            model = "auto"
     if model == "auto" and not req.headers.get("x-hub-provider") and scope is None:
         pin = (d.get("harness_model") or "auto").strip()
         if pin and pin != "auto":
-            _pp = find_model_provider(d, pin)
-            if _pp is None or model_disabled(_pp, pin):
-                return _anth_err(409, "Harness 锁定模型 %s 已不可用，请到 Harness 页重新选择或切回 Auto。" % pin)
+            _pp, _pm, _pe = resolve_model(d, pin)
+            if _pe or _pp is None or model_disabled(_pp, _pm):
+                return _anth_err(409, "Harness 锁定模型 %s 已不可用（或同名多渠道冲突，请用 渠道名::模型名 锁定），请到 Harness 页重新选择或切回 Auto。" % pin)
             model = pin
     obody = _anth_to_openai(body)
     obody["model"] = model
@@ -2236,6 +2464,8 @@ async def anth_messages(req: Request):
 
     if req.headers.get("x-hub-provider"):
         p = _pick_provider(d, req)
+        if model != "auto" and "::" in model:
+            model = model.partition("::")[2].strip()
         scoped = [(p, m) for m in (chat_candidates(d, p) if model == "auto" else [model])]
         if scope is not None:
             allowed = pool_scope_set(d, scope)
@@ -2243,7 +2473,17 @@ async def anth_messages(req: Request):
     elif model == "auto":
         scoped = pool_scope_candidates(d, scope) if scope is not None else all_chat_candidates(d)
     else:
-        p = find_model_provider(d, model)
+        # 渠道隔离：同名多渠道 409，不再自动挑第一个；限定写法精确落渠道。
+        p, _mb, _me = resolve_model(d, model, scope=scope, extra_cats={"图像生成"})
+        if _me:
+            log_call({"source": "proxy-anthropic", "provider": None,
+                      "model_requested": model, "model_used": None,
+                      "ok": False, "blocked": True, "latency_ms": 0,
+                      "error": "同名模型隔离拦截：" + str(model)})
+            return _anth_err(_me[0], _me[1])
+        model = _mb
+        if p is None:
+            return _anth_err(404, "找不到模型：%s（不在任何渠道，或不在号池范围内）" % model)
         scoped = [(p, model)]
         if scope is not None and (p["id"], model) not in pool_scope_set(d, scope, extra_cats={"图像生成"}):
             return _anth_err(403, "模型 %s 不在号池「%s」范围内，已拦截。" % (model, scope.get("name")))
@@ -2278,6 +2518,7 @@ async def anth_messages(req: Request):
         code, resp, ms = await _forward_chat(p, obody, m)
         usage = resp.get("usage") if code == 200 and isinstance(resp, dict) else None
         u = usage or {}
+        _key_quota_record(hk, u.get("total_tokens"))
         log_call({"source": "proxy-anthropic", "provider": p.get("name"),
                   "model_requested": body.get("model") or "auto", "model_used": m,
                   "ok": code == 200, "status": code, "latency_ms": ms,
@@ -2959,20 +3200,64 @@ def _lan_ip():
 # ---------------- 接入密钥管理（地址固定后，key 是唯一可变凭证） ----------------
 class KeyIn(BaseModel):
     name: str = ""
+    pool_id: str = ""           # 绑定号池 id：该 key 仅此池范围（空 = 全池权限）
+    quota: dict | None = None   # {"rpm": 30, "daily_tokens": 200000, "max_tokens": 2000}
+
+
+class KeyUpdate(BaseModel):
+    name: str | None = None
+    pool_id: str | None = None  # 传空字符串 = 解绑回全池
+    quota: dict | None = None   # 传 {} = 清除配额
 
 
 @app.post("/api/keys")
 def create_hub_key(inp: KeyIn):
-    """创建一个新接入 key：与主 key 同为全池权限，可随时重置（防泄露）/删除。"""
+    """创建接入 key。默认与主 key 同为全池权限；带 pool_id 则限定该号池范围，
+    带 quota 则按 key 限流（rpm / daily_tokens / max_tokens）。可随时重置/删除。"""
     d = load_data()
+    pid = (inp.pool_id or "").strip()
+    if pid and not any(pl.get("id") == pid for pl in d.get("pools") or []):
+        raise HTTPException(404, "号池 %s 不存在" % pid)
     ks = d.setdefault("hub_keys", [])
     k = {"id": uuid.uuid4().hex[:8],
          "name": (inp.name or "").strip() or ("key-" + str(len(ks) + 1)),
          "key": "hub-" + secrets.token_urlsafe(18),
-         "created_at": time.strftime("%Y-%m-%d %H:%M:%S")}
+         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+         "pool_id": pid,
+         "quota": _norm_quota(inp.quota)}
     ks.append(k)
     save_data(d)
     return k
+
+
+@app.put("/api/keys/{kid}")
+def update_hub_key(kid: str, inp: KeyUpdate):
+    """改 key 的名称 / 号池绑定 / 配额（用户升降级：换 pool_id 即换可访问模型组）。"""
+    d = load_data()
+    for k in d.get("hub_keys") or []:
+        if k.get("id") == kid:
+            if inp.name is not None and inp.name.strip():
+                k["name"] = inp.name.strip()
+            if inp.pool_id is not None:
+                pid = inp.pool_id.strip()
+                if pid and not any(pl.get("id") == pid for pl in d.get("pools") or []):
+                    raise HTTPException(404, "号池 %s 不存在" % pid)
+                k["pool_id"] = pid
+            if inp.quota is not None:
+                k["quota"] = _norm_quota(inp.quota)
+            save_data(d)
+            return k
+    raise HTTPException(404, "key 不存在")
+
+
+@app.get("/api/keys/{kid}/usage")
+def hub_key_usage(kid: str):
+    """查某 key 的配额与当日用量（计数器进程内存级，hub 重启清零）。"""
+    d = load_data()
+    for k in d.get("hub_keys") or []:
+        if k.get("id") == kid:
+            return _key_usage_view(k)
+    raise HTTPException(404, "key 不存在")
 
 
 @app.post("/api/keys/{kid}/reset")
