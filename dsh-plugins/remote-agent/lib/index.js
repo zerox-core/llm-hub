@@ -15,6 +15,8 @@
  *   POST /remote-agent/api/dsh/session-cancel                {sessionId} interrupt a busy attached agent
  *   GET  /remote-agent/api/dsh/active                        phone-created live agents + busy/error state
  *   GET  /remote-agent/api/dsh/model                          current default model selection
+ *   GET  /remote-agent/api/dsh/workspaces                     R44: 原生工作区列表（PC 端创建）+ 消息区根路径
+ *   POST /remote-agent/api/dsh/session-archive                R44: {sessionId} 归档（=桌面删除，两端同步消失）
  *   GET  /remote-agent/api/status                        dsh online heartbeat {uptimeSec, activeCount, model, now} (v34)
  *
  * Security: service ids are whitelist-only; start/stop invoke fixed scripts with
@@ -192,31 +194,96 @@ function defaultCwd() {
 const liveAgents = new Map();
 
 /* ------------------------------------------------------------------ */
-/* R32: 工作区/已删除会话过滤 + 控制台会话持久名单                      */
+/* R32+R44: 工作区/已删除会话过滤 + 控制台会话持久名单                  */
 /* ------------------------------------------------------------------ */
-/* dsh 界面删除的会话记在 workspace.json 的 global.archivedSessionIds，
- * 界面列表只显示当前工作区的 sessionIds；而 sessionQuery.listSessions()
- * 返回磁盘语料全量、不做任何过滤。控制台按 UI 语义自行对齐：
- * 已归档（已删除）一律不显示；非当前工作区的孤儿持久会话不显示；
- * 当前工作区会话 / 正在运行（live）/ 控制台创建的会话正常显示。 */
+/* dsh 界面删除的会话记在全局 archivedSessionIds，界面列表按工作区分组；
+ * 而 sessionQuery.listSessions() 返回磁盘语料全量、不做任何过滤。
+ * R44 起控制台直接对齐原生语义（数据源 = dsh-workspace 的
+ * ctx.workspaceRegistry 服务，文件只作兜底）：
+ * 已归档（已删除）一律不显示；不属于任何工作区的孤儿持久会话不显示；
+ * 任一工作区会话 / 正在运行（live）/ 控制台创建的会话正常显示，
+ * 并按「工作区分组 + 消息区」输出给手机端。 */
+
+/* R44: 原生工作区服务直达——归档与分组与桌面同一套语义、同一份数据。
+ * 手动改 workspace.json 会被运行中注册表的下一次 setState 覆盖，
+ * 所以归档/挂载一律走服务方法，不写文件。 */
+function wsRegistry(ctx) {
+  const r = svc(ctx, "workspaceRegistry");
+  return r && typeof r.list === "function" ? r : null;
+}
+/** 当前全部原生工作区快照；服务不可用返回 null（调用方走文件兜底）。 */
+function nativeWorkspaces(ctx) {
+  const reg = wsRegistry(ctx);
+  if (!reg) return null;
+  try {
+    return reg.list().map((w) => ({
+      id: String(w.id),
+      title: String(w.title || ""),
+      path: String(w.path || ""),
+      sessionIds: (w.sessionIds || []).map(String),
+      updatedAt: w.updatedAt || null,
+    }));
+  } catch (e) {
+    log("workspaceRegistry.list failed: " + String((e && e.message) || e));
+    return null;
+  }
+}
+function normCwd(p) {
+  return String(p || "").replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase();
+}
+/** cwd 命中哪个已注册工作区（分隔符/大小写归一后精确相等）。 */
+function workspaceOfCwd(wsList, cwd) {
+  const n = normCwd(cwd);
+  if (!n || !wsList) return null;
+  for (const w of wsList) if (normCwd(w.path) === n) return w;
+  return null;
+}
+/** cwd 是否落在手机消息区根（playground）之下。 */
+function isZoneCwd(cwd) {
+  const n = normCwd(cwd);
+  const root = normCwd(REMOTE_ZONE_ROOT);
+  return !!n && (n === root || n.startsWith(root + "\\"));
+}
+
 const WS_JSON = "F:\\deepseek-harness\\home\\storages\\workspace.json";
 let _wsCache = { mtimeMs: -1, data: null };
-function readWorkspaceIndex() {
+function readWorkspaceIndex(ctx) {
+  // 优先原生服务（与桌面同一权威数据源）；不可用时回退读 workspace.json，
+  // 并集取全部工作区的 sessionIds（R44 前只取 updatedAt 最大者）。
+  const wsList = nativeWorkspaces(ctx);
+  if (wsList) {
+    let archived = new Set();
+    try {
+      archived = new Set((wsRegistry(ctx).archivedSessionIds || []).map(String));
+    } catch (_) {}
+    const anyIds = new Set();
+    for (const w of wsList) for (const id of w.sessionIds) anyIds.add(String(id));
+    return { archived, anyIds, wsList };
+  }
   try {
     const st = fs.statSync(WS_JSON);
     if (_wsCache.data && _wsCache.mtimeMs === st.mtimeMs) return _wsCache.data;
     const raw = JSON.parse(fs.readFileSync(WS_JSON, "utf8"));
     const g = (raw && raw.global) || {};
     const wsTable = ((raw && raw.tables) || {}).workspaces || {};
-    let active = null;
+    const wsFileList = [];
+    const anyIds = new Set();
     for (const k of Object.keys(wsTable)) {
-      const w = wsTable[k];
-      if (!active || String(w.updatedAt || "") > String(active.updatedAt || "")) active = w;
+      const w = wsTable[k] || {};
+      const ids = (w.sessionIds || []).map(String);
+      for (const id of ids) anyIds.add(id);
+      wsFileList.push({
+        id: String(k),
+        title: String(w.title || ""),
+        path: String(w.path || ""),
+        sessionIds: ids,
+        updatedAt: w.updatedAt || null,
+      });
     }
     const data = {
       archived: new Set((g.archivedSessionIds || []).map(String)),
-      activeIds: new Set((((active && active.sessionIds) || []).map(String))),
-      activePath: String((active && active.path) || ""),
+      anyIds,
+      wsList: wsFileList,
     };
     _wsCache = { mtimeMs: st.mtimeMs, data };
     return data;
@@ -228,7 +295,7 @@ function isSessionVisible(id, flags, ws) {
   if (!id) return false;
   if (!ws) return true;
   if (ws.archived.has(id)) return false;
-  return ws.activeIds.has(id) || !!((flags && flags.live) || isPhoneCreated(id));
+  return ws.anyIds.has(id) || !!((flags && flags.live) || isPhoneCreated(id));
 }
 
 /* R32: 控制台创建的会话持久名单——dsh 重启后仍能在手机端列出/读取。 */
@@ -605,7 +672,7 @@ function apply(ctx) {
           let limit = Number(url.searchParams.get("limit") || 40);
           if (!Number.isFinite(limit) || limit < 1) limit = 40;
           if (limit > 200) limit = 200;
-          const wsIdx = readWorkspaceIndex();
+          const wsIdx = readWorkspaceIndex(ctx);
           const all = await sq.listSessions();
           const records = wsIdx
             ? all.filter((r) => {
@@ -623,6 +690,9 @@ function apply(ctx) {
             } catch (_) {
               title = "";
             }
+            // R44: 工作区分组——cwd 命中已注册工作区路径的归该工作区；
+            // 未命中但在 playground 根下的归「消息区」（手机默认窗口）。
+            const wsOf = wsIdx ? workspaceOfCwd(wsIdx.wsList, h.cwd) : null;
             rows.push({
               id: String(h.id || ""),
               title: title || h.title || "",
@@ -632,12 +702,94 @@ function apply(ctx) {
               createdAt: h.createdAt || null,
               updatedAt: h.updatedAt || null,
               phoneCreated: isPhoneCreated(String(h.id || "")),
+              workspaceId: wsOf ? wsOf.id : null,
+              workspaceTitle: wsOf ? wsOf.title : null,
+              zone: !wsOf && isZoneCwd(h.cwd || ""),
             });
           }
           send(res, 200, { ok: true, data: rows });
         } catch (e) {
           log("dsh/sessions error: " + String((e && e.message) || e));
           send(res, 500, { ok: false, error: String((e && e.message) || e) });
+        }
+      },
+    })
+  );
+
+  /* R44: 原生工作区列表（仅 PC 端可创建）——手机端按此做工作区分组，
+   * 并可挑选某个工作区路径作为 session-create 的 cwd 把会话建进去。 */
+  ctx.effect(() =>
+    ctx.webServer.register({
+      kind: "exact",
+      path: "/remote-agent/api/dsh/workspaces",
+      handler: async (req, res) => {
+        if (unauthorized(req, res)) return;
+        try {
+          const wsIdx = readWorkspaceIndex(ctx);
+          const list = (wsIdx && wsIdx.wsList) || [];
+          send(res, 200, {
+            ok: true,
+            data: {
+              zoneRoot: REMOTE_ZONE_ROOT,
+              workspaces: list.map((w) => ({
+                id: w.id,
+                title: w.title,
+                path: w.path,
+                sessionIds: w.sessionIds,
+                updatedAt: w.updatedAt,
+              })),
+            },
+          });
+        } catch (e) {
+          log("dsh/workspaces error: " + String((e && e.message) || e));
+          send(res, 500, { ok: false, error: String((e && e.message) || e) });
+        }
+      },
+    })
+  );
+
+  /* R44: 归档会话——走原生 workspaceRegistry.archiveSession()，与桌面「删除」
+   * 完全同一语义：写入全局 archivedSessionIds，桌面与手机同时消失；
+   * 会话本体与日志保留在磁盘（原生语义，不动工作区账务，可恢复）。 */
+  ctx.effect(() =>
+    ctx.webServer.register({
+      kind: "exact",
+      path: "/remote-agent/api/dsh/session-archive",
+      handler: async (req, res) => {
+        if (unauthorized(req, res)) return;
+        if (req.method !== "POST") {
+          send(res, 405, { ok: false, error: "POST only" });
+          return;
+        }
+        let body;
+        try {
+          body = JSON.parse((await readBody(req)) || "{}");
+        } catch {
+          send(res, 400, { ok: false, error: "bad json" });
+          return;
+        }
+        const sessionId = String(body.sessionId || "");
+        if (!sessionId || !/^[A-Za-z0-9_-]+$/.test(sessionId)) {
+          send(res, 400, { ok: false, error: "bad session id" });
+          return;
+        }
+        try {
+          const reg = wsRegistry(ctx);
+          if (!reg || typeof reg.archiveSession !== "function") {
+            send(res, 503, { ok: false, error: "工作区服务不可用，请在桌面端删除该会话" });
+            return;
+          }
+          await reg.archiveSession(sessionId);
+          log("remote session archived: " + sessionId);
+          send(res, 200, { ok: true, data: { sessionId, archived: true } });
+        } catch (e) {
+          const msg = String((e && e.message) || e);
+          if (/cannot archive session/.test(msg)) {
+            send(res, 404, { ok: false, error: "会话不存在（可能已被删除）" });
+            return;
+          }
+          log("dsh/session-archive error: " + msg);
+          send(res, 500, { ok: false, error: msg });
         }
       },
     })
@@ -664,7 +816,7 @@ function apply(ctx) {
             send(res, 503, { ok: false, error: "sessionQuery 服务不可用" });
             return;
           }
-          const wsIdx = readWorkspaceIndex();
+          const wsIdx = readWorkspaceIndex(ctx);
           let liveNow = false;
           try {
             const ss = svc(ctx, "sessions");
@@ -874,6 +1026,20 @@ function apply(ctx) {
             error: "",
           });
           notePhoneSession(sessionId);
+          // R44: cwd 命中 PC 端已注册工作区 → 挂进该工作区（桌面立即可见、手机按工作区分组）。
+          // 未命中（消息区目录）不创建工作区——原生工作区只能 PC 端创建。
+          const reg = wsRegistry(ctx);
+          if (reg) {
+            try {
+              const wsOfNew = typeof reg.resolveByPath === "function" ? await reg.resolveByPath(cwd) : null;
+              if (wsOfNew && typeof wsOfNew.attachSession === "function") {
+                await wsOfNew.attachSession(sessionId);
+                log("attached to workspace: " + sessionId + " -> " + String(wsOfNew.path || ""));
+              }
+            } catch (e) {
+              log("workspace attach failed: " + sessionId + " " + String((e && e.message) || e));
+            }
+          }
           const rec = liveAgents.get(sessionId);
           // rename via sessionTitle (optional)
           const sessionTitle = svc(ctx, "sessionTitle");
@@ -952,7 +1118,7 @@ function apply(ctx) {
         let rec = liveAgents.get(sessionId);
         if (!rec || !rec.agent) {
           // R39 懒挂载：手机可直接续聊任意可见会话，不再限于手机入口创建
-          const wsIdx = readWorkspaceIndex();
+          const wsIdx = readWorkspaceIndex(ctx);
           let liveNow = false;
           try {
             const ss = svc(ctx, "sessions");
