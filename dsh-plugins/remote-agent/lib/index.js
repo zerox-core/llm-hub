@@ -17,6 +17,10 @@
  *   GET  /remote-agent/api/dsh/model                          current default model selection
  *   GET  /remote-agent/api/dsh/workspaces                     R44: 原生工作区列表（PC 端创建）+ 消息区根路径
  *   POST /remote-agent/api/dsh/session-archive                R44: {sessionId} 归档（=桌面删除，两端同步消失）
+ *   GET  /remote-agent/api/dsh/models                       R45: 模型目录（llm.listProviders/listModels，按 provider 分组）
+ *   POST /remote-agent/api/dsh/model-set                    R45: {provider, model, sessionId?} 切换模型（resolveCallConfig 校验 + saveSelection 持久化；带 sessionId 时改该会话下一次请求）
+ *   GET  /remote-agent/api/dsh/commands?id=<sid>            R45: 会话可用快捷指令列表（/compact 等）
+ *   POST /remote-agent/api/dsh/command                      R45: {sessionId, line} 执行快捷指令，返回 {kind, text}
  *   GET  /remote-agent/api/status                        dsh online heartbeat {uptimeSec, activeCount, model, now} (v34)
  *
  * Security: service ids are whitelist-only; start/stop invoke fixed scripts with
@@ -886,6 +890,235 @@ function apply(ctx) {
           const sel = dm.currentSelection();
           send(res, 200, { ok: true, data: { provider: sel?.provider || "", model: sel?.model || "" } });
         } catch (e) {
+          send(res, 500, { ok: false, error: String((e && e.message) || e) });
+        }
+      },
+    })
+  );
+
+  /* R45: 模型目录——对齐 dsh 官方 buildModelCatalog：llm.listProviders() 逐个
+   * listModels，单 provider 失败降级为 failures 条目，不拖垮整体。 */
+  ctx.effect(() =>
+    ctx.webServer.register({
+      kind: "exact",
+      path: "/remote-agent/api/dsh/models",
+      handler: async (req, res) => {
+        if (unauthorized(req, res)) return;
+        try {
+          const llm = svc(ctx, "llm");
+          if (!llm || typeof llm.listProviders !== "function") {
+            send(res, 503, { ok: false, error: "llm 服务不可用" });
+            return;
+          }
+          let defSel = { provider: "", model: "" };
+          try {
+            const dm = svc(ctx, "agentDefaultModel");
+            if (dm && typeof dm.currentSelection === "function") {
+              const s = dm.currentSelection();
+              defSel = { provider: (s && s.provider) || "", model: (s && s.model) || "" };
+            }
+          } catch (_) {}
+          const groups = [];
+          const failures = [];
+          await Promise.all(
+            llm.listProviders().map(async (p) => {
+              try {
+                const models = await llm.listModels(p.id);
+                const entries = (models || [])
+                  .map((m) => ({ id: String(m.id || ""), name: String(m.name || m.id || "") }))
+                  .filter((m) => m.id);
+                if (entries.length > 0) groups.push({ id: String(p.id), name: String(p.name || p.id), models: entries });
+              } catch (e) {
+                failures.push({ id: String(p.id), message: String((e && e.message) || e) });
+              }
+            })
+          );
+          send(res, 200, { ok: true, data: { default: defSel, groups, failures } });
+        } catch (e) {
+          log("dsh/models error: " + String((e && e.message) || e));
+          send(res, 500, { ok: false, error: String((e && e.message) || e) });
+        }
+      },
+    })
+  );
+
+  /* R45: 切换模型——对齐 dsh 官方 selectModel 语义：resolveCallConfig 校验可服务，
+   * saveSelection 持久化默认（后续新会话生效）；带 sessionId 时同时
+   * agents.selectForNextRequest 改该会话下一次请求。 */
+  ctx.effect(() =>
+    ctx.webServer.register({
+      kind: "exact",
+      path: "/remote-agent/api/dsh/model-set",
+      handler: async (req, res) => {
+        if (unauthorized(req, res)) return;
+        if (req.method !== "POST") {
+          send(res, 405, { ok: false, error: "POST only" });
+          return;
+        }
+        let body;
+        try {
+          body = JSON.parse((await readBody(req)) || "{}");
+        } catch {
+          send(res, 400, { ok: false, error: "bad json" });
+          return;
+        }
+        const provider = String(body.provider || "");
+        const model = String(body.model || "");
+        if (!provider || !model) {
+          send(res, 400, { ok: false, error: "provider 与 model 均必填" });
+          return;
+        }
+        try {
+          const llm = svc(ctx, "llm");
+          const dm = svc(ctx, "agentDefaultModel");
+          if (!llm || typeof llm.resolveCallConfig !== "function") {
+            send(res, 503, { ok: false, error: "llm 服务不可用" });
+            return;
+          }
+          if (!dm || typeof dm.saveSelection !== "function") {
+            send(res, 503, { ok: false, error: "agentDefaultModel 服务不可用" });
+            return;
+          }
+          const resolved = await llm.resolveCallConfig({ provider, model });
+          const selected = { provider: resolved.provider, model: resolved.model };
+          if (resolved.reasoningEffort !== undefined) selected.reasoningEffort = resolved.reasoningEffort;
+          const sid = String(body.sessionId || "");
+          if (sid && /^[A-Za-z0-9_-]+$/.test(sid)) {
+            try {
+              const attached = await attachAgent(ctx, sid);
+              const agentsSvc = svc(ctx, "agents");
+              if (attached.rec && agentsSvc && typeof agentsSvc.selectForNextRequest === "function") {
+                agentsSvc.selectForNextRequest(attached.rec.agent, selected);
+                log("model-set next-request: " + sid + " -> " + selected.provider + "/" + selected.model);
+              }
+            } catch (e) {
+              log("model-set next-request failed: " + sid + " " + String((e && e.message) || e));
+            }
+          }
+          await dm.saveSelection(selected);
+          log("model-set: default -> " + selected.provider + "/" + selected.model);
+          send(res, 200, { ok: true, data: { selected } });
+        } catch (e) {
+          log("dsh/model-set error: " + String((e && e.message) || e));
+          send(res, 500, { ok: false, error: String((e && e.message) || e) });
+        }
+      },
+    })
+  );
+
+  /* R45: 会话快捷指令列表——commands.list(agent)（/compact、/plan 等）。 */
+  ctx.effect(() =>
+    ctx.webServer.register({
+      kind: "exact",
+      path: "/remote-agent/api/dsh/commands",
+      handler: async (req, res) => {
+        if (unauthorized(req, res)) return;
+        try {
+          const url = new URL(req.url || "/remote-agent/api/dsh/commands", "http://127.0.0.1");
+          const sid = String(url.searchParams.get("id") || "");
+          if (!sid || !/^[A-Za-z0-9_-]+$/.test(sid)) {
+            send(res, 400, { ok: false, error: "bad session id" });
+            return;
+          }
+          const cmds = svc(ctx, "commands");
+          if (!cmds || typeof cmds.list !== "function") {
+            send(res, 503, { ok: false, error: "commands 服务不可用" });
+            return;
+          }
+          const wsIdx = readWorkspaceIndex(ctx);
+          let liveNow = false;
+          try {
+            const ss = svc(ctx, "sessions");
+            if (ss && typeof ss.get === "function") liveNow = !!ss.get(sid);
+          } catch (_) {}
+          if (!isSessionVisible(sid, { live: liveNow }, wsIdx)) {
+            send(res, 404, { ok: false, error: "该会话已删除或不在当前工作区" });
+            return;
+          }
+          const attached = await attachAgent(ctx, sid);
+          if (!attached.rec) {
+            send(res, attached.status || 409, { ok: false, error: attached.error });
+            return;
+          }
+          const list = cmds.list(attached.rec.agent) || [];
+          send(res, 200, {
+            ok: true,
+            data: list.map((c) => ({
+              name: String(c.name || ""),
+              description: String(c.description || ""),
+              hint: String((c.input && c.input.hint) || ""),
+            })),
+          });
+        } catch (e) {
+          log("dsh/commands error: " + String((e && e.message) || e));
+          send(res, 500, { ok: false, error: String((e && e.message) || e) });
+        }
+      },
+    })
+  );
+
+  /* R45: 执行快捷指令——commands.execute(agent, line)；结果 {kind, text} 直接回给手机。 */
+  ctx.effect(() =>
+    ctx.webServer.register({
+      kind: "exact",
+      path: "/remote-agent/api/dsh/command",
+      handler: async (req, res) => {
+        if (unauthorized(req, res)) return;
+        if (req.method !== "POST") {
+          send(res, 405, { ok: false, error: "POST only" });
+          return;
+        }
+        let body;
+        try {
+          body = JSON.parse((await readBody(req)) || "{}");
+        } catch {
+          send(res, 400, { ok: false, error: "bad json" });
+          return;
+        }
+        const sessionId = String(body.sessionId || "");
+        const line = String(body.line || "").trim();
+        if (!sessionId || !/^[A-Za-z0-9_-]+$/.test(sessionId)) {
+          send(res, 400, { ok: false, error: "bad session id" });
+          return;
+        }
+        if (!line || line.length > 2000) {
+          send(res, 400, { ok: false, error: "line 必填" });
+          return;
+        }
+        try {
+          const cmds = svc(ctx, "commands");
+          if (!cmds || typeof cmds.execute !== "function") {
+            send(res, 503, { ok: false, error: "commands 服务不可用" });
+            return;
+          }
+          const wsIdx = readWorkspaceIndex(ctx);
+          let liveNow = false;
+          try {
+            const ss = svc(ctx, "sessions");
+            if (ss && typeof ss.get === "function") liveNow = !!ss.get(sessionId);
+          } catch (_) {}
+          if (!isSessionVisible(sessionId, { live: liveNow }, wsIdx)) {
+            send(res, 404, { ok: false, error: "该会话已删除或不在当前工作区" });
+            return;
+          }
+          const attached = await attachAgent(ctx, sessionId);
+          if (!attached.rec) {
+            send(res, attached.status || 409, { ok: false, error: attached.error });
+            return;
+          }
+          log("dsh/command: " + sessionId + " " + line.slice(0, 80));
+          const exec = await cmds.execute(attached.rec.agent, line, []);
+          if (!exec) {
+            send(res, 404, { ok: false, error: "未知指令或格式不符：" + line.slice(0, 60) });
+            return;
+          }
+          const r = exec.result || {};
+          send(res, 200, {
+            ok: true,
+            data: { commandId: exec.commandId || null, kind: r.kind || "success", text: r.text || "" },
+          });
+        } catch (e) {
+          log("dsh/command error: " + String((e && e.message) || e));
           send(res, 500, { ok: false, error: String((e && e.message) || e) });
         }
       },
