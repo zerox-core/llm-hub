@@ -21,7 +21,7 @@
 <div class="main">
 <div class="wrap">
   <div class="topbar">
-    <div class="title">渠道管理<small>渠道总览 · 单渠道管理 · 接入地址固定</small></div>
+    <div class="title">渠道管理<small>上游渠道 → 渠道号池 → 使用池 → 分发 key · 接入地址固定</small></div>
     <div class="actions">
       <span id="quotaChip" class="chip">百炼额度：未同步</span>
       <span id="hubUrlChip" class="chip" style="cursor:pointer" title="Hub 统一入口 URL（OpenAI 兼容 /v1），点击复制" onclick="copyHubUrl()">URL：…</span>
@@ -57,33 +57,47 @@
       </div>
     </div>
     <div class="form-row">
+      <label class="paid-box" title="勾选后该渠道请求经代理出口访问（如 Google AI Studio 等海外服务）"><input type="checkbox" id="f-egress">出海渠道（经代理出口访问，如 Google AI Studio）</label>
+    </div>
+    <div class="form-row">
       <button class="primary" onclick="addProvider()">保存并自动拉取模型列表</button>
       <button onclick="toggleAdd()">取消</button>
       <span id="addMsg" class="quota-line"></span>
     </div>
   </div>
 
-  <div class="card cfg-panel" id="cfgPanel"></div>
-
   <div id="overviewSec">
     <div class="tile-row" id="tiles"></div>
+
+    <div class="sec-title"><span>① 上游渠道（自建渠道 · 每个渠道一个账号 / 反代，可扩充删除；点卡片进详情管模型）</span></div>
+    <div class="panel-grid" id="panels"></div>
+
     <div class="sec-title" style="display:flex;align-items:center;gap:10px">
-      <span>号池分组（顶部为全部号池共用；每个号池自己的 key + auto 轮询，dsh 内同名分组自动同步）</span>
-      <button class="small" onclick="addPool()">+ 空白号池</button>
-      <button class="small" onclick="openPoolPicker(null)">+ 模型组合号池</button>
+      <span>② 渠道号池（与上游品牌一一对应 · 添加渠道自动归并、新品牌自动建池 · 这层是我们自己的 URL + 池 key，可直接调用）</span>
+    </div>
+    <div class="card pool-panel" id="chanPoolPanel"></div>
+
+    <div class="sec-title" style="display:flex;align-items:center;gap:10px">
+      <span>③ 使用池（按自建需求从渠道号池勾选模型组合 · 跨品牌自动调度 · 每池专属 key，场景分发用它）</span>
+      <button class="small" onclick="openPoolPicker(null)">+ 新建使用池</button>
+    </div>
+    <div class="card pool-panel" id="usePoolPanel"></div>
+
+    <div class="sec-title" style="display:flex;align-items:center;gap:10px">
+      <span>④ 分发 key 与用量（子 key 挂在池下 · 按 key 限量与监控；任一 key + 固定地址即可调 /v1）</span>
       <button class="small only-local" onclick="syncDsh()">同步到 dsh</button>
     </div>
-    <div class="card pool-panel" id="poolPanel"></div>
-    <div class="sec-title" style="display:flex;align-items:center;gap:10px">
-      <span>渠道面板（每种渠道一个面板，点击进入单独管理该渠道下的模型）</span>
-      <span id="poolBar"></span>
-    </div>
-    <div class="panel-grid" id="panels"></div>
-    <div class="sec-title">百炼免费额度明细（来自 bl usage free，分钟级口径以控制台为准）</div>
+    <div class="card pool-panel" id="accessPanel"></div>
+    <details class="raw"><summary>调用配置（Hub 入口 + 各渠道直连地址，调试用）</summary>
+      <div class="card cfg-panel" id="cfgPanel"></div>
+    </details>
+
+    <details class="raw"><summary>百炼免费额度明细（来自 bl usage free，分钟级口径以控制台为准）</summary>
     <div class="card">
       <div id="quotaSummary" class="quota-line">尚未同步。在百炼渠道卡片的「配置与授权」里点「同步百炼额度」。</div>
       <details class="raw"><summary>查看原始返回（调试用）</summary><pre id="quotaRaw">（无）</pre></details>
     </div>
+    </details>
   </div>
   <div id="detailSec" style="display:none"></div>
 </div>
@@ -160,17 +174,14 @@ function qState(m){
 function isEnabled(p, m){ return !(p.disabled_models || []).includes(m); }
 function collide(m){ return (STATE.providers||[]).filter(x => (x.models||[]).includes(m)).length > 1; }
 function enabledCount(p){
-  const total = (p.models||[]).length;
-  return total - ((p.disabled_models||[]).filter(m => (p.models||[]).includes(m)).length);
+  const total = pvModels(p).length;
+  return total - ((p.disabled_models||[]).filter(m => pvModels(p).includes(m)).length);
 }
 
 // ---- 反重力（Antigravity）组额度：组内模型共享 5 小时 + 每周额度 ----
 function isAgProvider(p){ return p && p.type === 'openai' && (p.base_url||'').includes(':8317') && p.kind !== 'wb'; }
 function isWbProvider(p){ return p && p.kind === 'wb'; }
 function isCopilotProvider(p){ return p && p.type === 'openai' && (p.base_url||'').includes(':4141'); }
-function isSnProvider(p){ return p && (p.id === '975abae5fa' || (p.base_url||'').includes('sensenova')); }
-function snRate(m){ const sq = STATE.sn_quota || {}; return (sq.rates||{})[m] || null; }
-function isVolcProvider(p){ return p && (p.base_url||'').includes('volces.com'); }
 function agModelGroup(m){ return (m||'').toLowerCase().startsWith('gemini') ? 'gemini' : 'third'; }
 function agGroupTitle(key){ return key === 'gemini' ? 'Gemini 组' : 'Claude/GPT 组'; }
 
@@ -251,32 +262,6 @@ function quotaCell(m, isBailian, p){
       '<span class="quota-bar"><i class="'+cls+'" style="width:'+pct.toFixed(1)+'%"></i></span>' +
       '<span class="q-num">组余 '+(Math.round(worst*1000)/10)+'%</span>';
   }
-  if(p && isSnProvider(p)){
-    const r = snRate(m);
-    if(!r) return '<span class="chip">倍率未收录</span>';
-    if(r[2] === 'unusable') return '<span class="chip bad">API 404 不可用</span>';
-    const stChip = r[2] === 'confirmed' ? '<span class="chip ok">倍率已确认</span>'
-      : (r[2] === 'single' ? '<span class="chip warn">倍率待确认</span>' : '<span class="chip">倍率未实测</span>');
-    if(!(r[0] || r[1])) return stChip;
-    return stChip + ' <span class="q-num">入 ' + r[0] + ' / 出 ' + r[1] + ' 积分/1K</span>';
-  }
-  if(p && isVolcProvider(p)){
-    const vq = STATE.volc_quota || {};
-    if(!vq.configured) return '<span class="chip">需配 AK</span> <span class="q-num">免费额度查询需火山账号 AccessKey</span>';
-    if(!vq.synced_at) return '<span class="q-num">额度未同步</span>';
-    const mi = (vq.models||{})[m];
-    if(!mi) return '<span class="q-num">—</span>';
-    if(mi.error) return '<span class="chip bad" title="'+esc(mi.error)+'">查询失败</span>';
-    if(mi.paid) return '<span class="chip warn">付费</span> <span class="q-num">无免费额度</span>';
-    if(mi.state && mi.state !== 'Available') return '<span class="chip">未开通</span> <span class="q-num">'+esc(mi.state)+'</span>';
-    const tot = Number(mi.total||0);
-    if(!tot) return '<span class="q-num">无免费额度记录</span>';
-    const remv = Math.max(0, tot - Number(mi.consumed||0));
-    const pct = Math.max(0, Math.min(100, remv / tot * 100));
-    const cls = pct < 10 ? 'bad' : (pct < 30 ? 'warn' : '');
-    return '<span class="quota-bar"><i class="'+cls+'" style="width:'+pct.toFixed(1)+'%"></i></span>' +
-      '<span class="q-num">剩 '+fmtNum(remv)+' / '+fmtNum(tot)+'</span>';
-  }
   if(!isBailian) return '<span class="q-num">—</span>';
   const q = (STATE.quota && STATE.quota.entries) ? STATE.quota.entries[m] : null;
   if(!q) return '<span class="q-num" style="color:var(--bad)">无免费额度</span>';
@@ -307,12 +292,23 @@ function isFreeOnly(pid){ return localStorage.getItem('hub_freeonly_'+pid) === '
 function setFreeOnly(pid, v){ localStorage.setItem('hub_freeonly_'+pid, v ? '1' : '0'); }
 function toggleFreeOnly(pid, on){ setFreeOnly(pid, on); render(); }
 
+function isBlocked(p, m){
+  const ml = String(m).toLowerCase();
+  return (p.model_blocklist||[]).some(x => {
+    x = String(x).trim().toLowerCase();
+    if(!x) return false;
+    if(x.startsWith('=')) return ml === x.slice(1);
+    return ml.includes(x);
+  });
+}
+function pvModels(p){ return (p.models||[]).filter(m => !isBlocked(p, m)); }
+
 function orderedModels(p){
   const models = p.models || [];
   const order = p.model_order || [];
   const seen = new Set(); const out = [];
-  for(const m of order){ if(models.includes(m) && !seen.has(m)){ seen.add(m); out.push(m); } }
-  for(const m of models){ if(!seen.has(m)){ seen.add(m); out.push(m); } }
+  for(const m of order){ if(models.includes(m) && !seen.has(m) && !isBlocked(p, m)){ seen.add(m); out.push(m); } }
+  for(const m of models){ if(!seen.has(m) && !isBlocked(p, m)){ seen.add(m); out.push(m); } }
   return out;
 }
 
@@ -323,13 +319,6 @@ function snapshotOpenCats(){
   return open;
 }
 let _openCats = new Set();
-// 渲染前后保持「配置与授权」展开状态（后台重渲染不再把用户刚展开的授权面板收起来）
-function snapshotOpenAuth(){
-  const open = new Set();
-  document.querySelectorAll('details.authbox[open]').forEach(d => open.add(d.id));
-  return open;
-}
-let _openAuths = new Set();
 
 function renderAgQuota(p){
   const aq = STATE.ag_quota || {};
@@ -400,131 +389,11 @@ function renderWbQuota(p){
     inner + syncLine + '</div>';
 }
 
-
-// ---- 商汤 SenseNova 积分（公测双池：本地估算 + 人工校准） ----
-function renderSnQuota(p){
-  const sq = STATE.sn_quota || {};
-  const pools = sq.pools || {};
-  const rates = sq.rates || {};
-  const cal = sq.calibration || {};
-  let inner = '';
-  if(!sq.configured)
-    inner += '<div class="quota-line" style="color:var(--warn)">商汤控制台额度接口需要网页登录态、无法自动同步。请打开控制台 Token 计划页，把两个池的「已用」积分填到下方校准一次；之后 Hub 会按倍率对每次中转调用本地扣减。</div>';
-  const bar3 = (used, cap) => {
-    const rem = Math.max(0, (cap||0) - (used||0));
-    const pct = cap > 0 ? Math.max(0, Math.min(100, rem / cap * 100)) : null;
-    const cls = pct === null ? '' : (pct < 10 ? 'bad' : (pct < 30 ? 'warn' : ''));
-    const bar = pct === null ? '' : '<span class="quota-bar"><i class="'+cls+'" style="width:'+pct.toFixed(1)+'%"></i></span>';
-    return {rem, bar};
-  };
-  const poolLine = (label, pk) => {
-    const a = bar3(pk.used_5h, pk.cap_5h), b = bar3(pk.used_week, pk.cap_week);
-    return '<div class="quota-line"><b>'+label+'</b><span class="q-num">60,000 积分/5小时 + 600,000 积分/周</span></div>' +
-      '<div class="quota-line"><span class="ag-wname">5 小时窗口</span>'+a.bar+'<span class="q-num">余 '+fmtNum(a.rem)+' / '+fmtNum(pk.cap_5h||0)+' · 已用 '+fmtNum(pk.used_5h||0)+(pk.reset_5h?' · '+esc(pk.reset_5h)+' 重置':'')+'</span></div>' +
-      '<div class="quota-line"><span class="ag-wname">每周窗口</span>'+b.bar+'<span class="q-num">余 '+fmtNum(b.rem)+' / '+fmtNum(pk.cap_week||0)+' · 已用 '+fmtNum(pk.used_week||0)+(pk.reset_week?' · '+esc(pk.reset_week)+' 重置':'')+'</span></div>';
-  };
-  inner += poolLine('通用积分池（全部免费模型）', pools.general || {});
-  inner += poolLine('Flash-Lite 专属池（溢出自动转扣通用池）', pools.flash_lite || {});
-  let rrows = '<div class="quota-line"><b>模型倍率</b><span class="q-num">积分 = tokens/1000 × 倍率；推理 tokens 按输出计</span></div>';
-  (p.models||[]).forEach(m => {
-    const r = rates[m];
-    let chip, rtxt = '';
-    if(!r) chip = '<span class="chip">未收录</span>';
-    else if(r[2]==='confirmed'){ chip = '<span class="chip ok">已实测确认</span>'; rtxt = '入 '+r[0]+' / 出 '+r[1]+' 积分/1K'; }
-    else if(r[2]==='single'){ chip = '<span class="chip warn">单方程待确认</span>'; rtxt = '入 '+r[0]+' / 出 '+r[1]+'（候选）积分/1K'; }
-    else if(r[2]==='unusable') chip = '<span class="chip bad">API 404 不可用</span>';
-    else chip = '<span class="chip">未实测</span>';
-    const ubm = (sq.used_by_model||{})[m];
-    rrows += '<div class="quota-line"><span class="ag-wname">'+esc(m)+'</span>'+chip+'<span class="q-num">'+rtxt+(ubm?(rtxt?' · ':'')+'校准后已用 '+fmtNum(ubm)+' 积分':'')+'</span></div>';
-  });
-  const calForm = '<div class="quota-line"><span class="q-num">'+(cal.ts ? '校准于 '+esc(String(cal.ts).slice(5,16)) : '从未校准')+' · 活动固定积分 '+fmtNum(sq.activity||0)+'（返赠 1:1 累计，不参与扣减）</span></div>' +
-    '<div class="quota-line"><span class="ag-wname">通用池已用</span><input id="sn-g5" placeholder="5h 已用" style="width:90px"> <input id="sn-gw" placeholder="每周已用" style="width:90px"></div>' +
-    '<div class="quota-line"><span class="ag-wname">专属池已用</span><input id="sn-f5" placeholder="5h 已用" style="width:90px"> <input id="sn-fw" placeholder="每周已用" style="width:90px"></div>' +
-    '<div class="quota-line"><span class="ag-wname">重置时间</span><input id="sn-r5" placeholder="5h 如 9月29日 03:05" style="width:150px"> <input id="sn-rw" placeholder="每周 如 10月5日 22:05" style="width:150px"> <input id="sn-act" placeholder="活动积分" style="width:70px"> <button class="small" onclick="submitSnCalibrate()">保存校准</button></div>' +
-    '<div class="quota-line"><span class="q-num">填控制台显示的「已用」值（不是剩余）；保存后 Hub 按倍率自动扣减，随时可再校准纠偏</span></div>';
-  return '<div class="ag-quota"><div class="quota-line"><b>商汤 SenseNova 积分</b>' +
-    '<span class="q-num">公测 Token 计划：通用池 + Flash-Lite 专属池；按模型倍率 × tokens 扣积分，本地估算 + 人工校准</span></div>' +
-    inner + rrows + calForm + '</div>';
-}
-
-async function submitSnCalibrate(){
-  const v = id => { const el = document.getElementById(id); return el ? el.value.trim() : ''; };
-  try{
-    const r = await api('/api/sn/quota/calibrate', 'POST', {
-      general_5h: v('sn-g5'), general_week: v('sn-gw'),
-      flash_5h: v('sn-f5'), flash_week: v('sn-fw'),
-      win5h_reset: v('sn-r5'), week_reset: v('sn-rw'), activity: v('sn-act')});
-    if(r.ok) toast('已保存 SenseNova 校准');
-    else toast('保存失败', true);
-  }catch(e){ toast('保存失败：' + e.message, true); }
-  await load();
-}
-
-function renderVolcQuota(p){
-  const vq = STATE.volc_quota || {};
-  let rows = '';
-  (p.models||[]).forEach(m => {
-    const mi = (vq.models||{})[m];
-    let cell;
-    if(!vq.configured) cell = '<span class="chip">未配置</span> <span class="q-num">填下方 AccessKey 后保存</span>';
-    else if(!vq.synced_at) cell = '<span class="chip">未同步</span>';
-    else if(!mi) cell = '<span class="q-num">无记录</span>';
-    else if(mi.error) cell = '<span class="chip bad" title="'+esc(mi.error)+'">查询失败</span>';
-    else if(mi.paid) cell = '<span class="chip warn">付费</span> <span class="q-num">无免费额度</span>';
-    else if(mi.state && mi.state !== 'Available') cell = '<span class="chip">未开通</span> <span class="q-num">'+esc(mi.state)+'</span>';
-    else if(!Number(mi.total||0)) cell = '<span class="q-num">无免费额度记录</span>';
-    else {
-      const t = Number(mi.total), r2 = Math.max(0, t - Number(mi.consumed||0));
-      const pct2 = Math.max(0, Math.min(100, r2 / t * 100));
-      const cls2 = pct2 < 10 ? 'bad' : (pct2 < 30 ? 'warn' : '');
-      cell = '<span class="quota-bar"><i class="'+cls2+'" style="width:'+pct2.toFixed(1)+'%"></i></span>' +
-        '<span class="q-num">剩 '+fmtNum(r2)+' / '+fmtNum(t)+(mi.foundation && mi.foundation !== m ? ' · 基础模型 '+esc(mi.foundation) : '')+'</span>';
-    }
-    rows += '<div class="quota-line"><span class="ag-wname">'+esc(m)+'</span>'+cell+'</div>';
-  });
-  const cfgForm = '<div class="quota-line"><span class="ag-wname">AccessKey</span>' +
-    '<input id="volc-ak" placeholder="Access Key ID" style="width:190px"> ' +
-    '<input id="volc-sk" type="password" placeholder="Secret Access Key" style="width:230px"> ' +
-    '<button class="small" onclick="saveVolcKeys(this)">保存并验证</button></div>' +
-    '<div class="quota-line"><span class="q-num">免费额度只能用火山账号 AccessKey 查（GetModelActivation 只读接口，推理 API Key 查不了）。' +
-    'AK/SK 保存在服务器端 data.json，仅用于签名只读查询。获取：火山引擎控制台 → 右上角头像 → API Access Key 管理。</span></div>';
-  return '<div class="ag-quota"><div class="quota-line"><b>火山方舟免费额度</b>' +
-    '<span class="q-num">各基础模型开通时赠送的初始免费推理额度，按模型独立核算</span></div>' +
-    rows +
-    '<div class="quota-line"><span class="q-num">'+(vq.synced_at ? '同步于 '+esc(String(vq.synced_at).slice(5,16)) : '尚未同步')+
-    (vq.access_key_masked ? ' · AK '+esc(vq.access_key_masked) : '')+'</span>' +
-    '<button class="small" onclick="syncVolcQuota()">同步免费额度</button></div>' + cfgForm + '</div>';
-}
-
-async function saveVolcKeys(btn){
-  const akEl = document.getElementById('volc-ak'), skEl = document.getElementById('volc-sk');
-  const ak = akEl ? akEl.value.trim() : '', sk = skEl ? skEl.value.trim() : '';
-  if(!ak || !sk){ toast('请填写 Access Key ID 和 Secret Access Key', true); return; }
-  btn.disabled = true; btn.textContent = '验证中…';
-  try{
-    const r = await api('/api/volc/keys', 'POST', {access_key: ak, secret_key: sk});
-    if(r.ok){ toast('AccessKey 验证通过（已开通基础模型 '+r.activated+' 个），已保存'); await load(); }
-    else toast('验证失败：'+(r.error||''), true);
-  }catch(e){ toast('保存失败：'+e.message, true); }
-  btn.disabled = false; btn.textContent = '保存并验证';
-}
-
-async function syncVolcQuota(){
-  toast('正在同步火山免费额度…');
-  try{
-    const r = await api('/api/volc/quota/refresh', 'POST', {});
-    if(r.ok) toast('已同步火山免费额度（'+(r.synced||0)+' / '+(r.total||0)+' 模型）');
-    else toast('同步失败：'+(r.error||''), true);
-  }catch(e){ toast('同步失败：' + e.message, true); }
-  await load();
-}
-
+/* R49：渠道归属由后端按品牌自动归并，详情卡只读展示所在渠道号池，不再手动移池 */
 function poolSwitchSel(p){
-  const pools = STATE.pools || [];
-  if(pools.length <= 1) return '';
-  const opts = pools.map(pl =>
-    '<option value="'+esc(pl.id)+'"'+(pl.id === p.pool_id ? ' selected' : '')+'>'+esc(pl.name)+'</option>').join('');
-  return '<select class="poolsel" title="移至号池" onchange="moveToPool(\''+p.id+'\', this.value)">'+opts+'</select>';
+  const pl = (STATE.pools || []).find(x => x.id === p.pool_id);
+  if(!pl) return '';
+  return '<span class="chip" title="渠道按品牌自动归并到渠道号池，不可手动移池">号池：'+esc(pl.name)+'</span>';
 }
 
 function renderCopilotQuota(p){
@@ -569,16 +438,15 @@ function renderProvider(p, forceOpen){
   const isAg = isAgProvider(p);
   const isWb = isWbProvider(p);
   const isCopilot = isCopilotProvider(p);
-  const isSn = isSnProvider(p);
-  const isVolc = isVolcProvider(p);
   const wbst = STATE.wb_status || {};
   const activeNoFree = isBailian && p.active_model && !p.allow_paid && qState(p.active_model) !== 'free_ok';
   const activeWarn = activeNoFree ? ' <span class="chip bad">无免费额度</span>' : '';
   const paidChip = p.allow_paid ? ' <span class="chip warn">允许付费</span>' : '';
   const wbChip = isWb ? ' <span class="chip '+(wbst.logged_in?'ok':'bad')+'">'+(wbst.logged_in?'已登录':'未登录')+'</span>' : '';
   let head = '<div class="p-head"><span class="p-name">'+esc(p.name)+'</span>' +
-    '<span class="chip">'+(isSn?'商汤 SenseNova':(isVolc?'火山方舟':(isWb?'腾讯 CodeBuddy 反代':(isCopilot?'GitHub Copilot 反代':(isBailian?'阿里云百炼':'OpenAI 兼容')))))+'</span>' + wbChip + paidChip +
-    '<span class="chip blue">已勾选 '+enabledCount(p)+' / '+(p.models||[]).length+'</span>' +
+    '<span class="chip">'+(isWb?'腾讯 CodeBuddy 反代':(isCopilot?'GitHub Copilot 反代':(isBailian?'阿里云百炼':'OpenAI 兼容')))+'</span>' + wbChip + paidChip +
+    '<span class="chip blue">已勾选 '+enabledCount(p)+' / '+pvModels(p).length+'</span>' +
+    ((p.models||[]).length - pvModels(p).length > 0 ? '<span class="chip warn">已过滤 '+((p.models||[]).length - pvModels(p).length)+'</span>' : '') +
     '<span class="p-active">当前模型：<b>'+esc(p.active_model||'未选择')+'</b>'+activeWarn+'</span>' +
     '<span class="grow"></span>' + poolSwitchSel(p) +
     (forceOpen ? '' : '<button class="small" onclick="toggleCollapse(\''+p.id+'\')">'+(collapsed?'展开':'收起')+'</button>') + '</div>';
@@ -628,7 +496,11 @@ function renderProvider(p, forceOpen){
     }).join('');
     const openByDefault = _openCats.size ? _openCats.has(catId) : (c === '文本生成' || groups[c].includes(p.active_model));
     const enCnt = groups[c].filter(m => isEnabled(p, m)).length;
-    return '<details class="cat" id="'+catId+'"'+(openByDefault?' open':'')+'><summary>'+esc(c)+'<span class="cnt">'+groups[c].length+' 个模型 · 已勾选 '+enCnt+'</span></summary>' +
+    return '<details class="cat" id="'+catId+'"'+(openByDefault?' open':'')+'><summary>'+esc(c)+'<span class="cnt">'+groups[c].length+' 个模型 · 已勾选 '+enCnt+'</span>' +
+      '<span style="float:right" onclick="event.stopPropagation()">' +
+      '<button class="tiny" title="勾选本分类全部模型（进入可调列表）" onclick="bulkEnableCat(\''+p.id+'\',\''+esc(c)+'\',true)">全选</button> ' +
+      '<button class="tiny" title="取消勾选本分类全部模型（退出可调列表）" onclick="bulkEnableCat(\''+p.id+'\',\''+esc(c)+'\',false)">全不选</button>' +
+      '</span></summary>' +
       '<table><thead><tr><th style="width:3%"></th><th style="width:29%">模型</th><th style="width:28%">免费额度</th><th style="width:10%">连通性</th><th style="width:6%">排序</th><th>操作</th></tr></thead><tbody>'+rows+'</tbody></table></details>';
   }).join('');
 
@@ -646,6 +518,16 @@ function renderProvider(p, forceOpen){
     '<span class="q-num">已隐藏无免费额度 '+hiddenCnt+' 个</span>' : '';
   const quotaNote = isBailian ? '<span class="chip '+(nFree?'ok':'bad')+'">有免费额度 '+nFree+' / '+models.length+'</span>' : '';
 
+  // 渠道级模型过滤（2026-09-27 用户拍板）：被过滤模型不进轮询、不出现在号池选择列表与 /v1/models
+  const blkRules = p.model_blocklist || [];
+  const blkModels = (p.models||[]).filter(m => isBlocked(p, m));
+  const blockBox = '<details class="cat" id="blk-'+p.id+'"><summary>模型过滤（渠道级）<span class="cnt">'+blkRules.length+' 条规则 · 当前过滤掉 '+blkModels.length+' 个模型</span></summary>' +
+    '<div class="quota-line">每行一条规则：模型名包含该文本（不区分大小写）即被过滤；行首加 <code>=</code> 表示精确匹配（如 <code>=gpt-4</code> 只过滤 gpt-4 本身、不误伤 gpt-4o）。被过滤的模型在全站视为该渠道不提供——不进 auto 轮询、不出现在渠道号池/使用池的选择列表、不出现在 /v1/models。原始模型列表保留，删掉规则即可恢复。</div>' +
+    '<textarea id="blkTxt-'+p.id+'" rows="4" style="width:100%;font-family:monospace;font-size:12px;box-sizing:border-box" placeholder="例如：&#10;gpt-5&#10;embedding">'+esc(blkRules.join('\n'))+'</textarea>' +
+    '<div style="margin-top:6px"><button class="small primary" onclick="saveBlocklist(\''+p.id+'\')">保存过滤规则</button>' +
+    (blkModels.length ? ' <span class="q-num">当前被过滤：'+esc(blkModels.join('、'))+'</span>' : '') +
+    '</div></details>';
+
   return '<div class="card">' + head + authBoxHtml(p, false) + wbHint +
     '<div class="p-meta">' +
       '<span>URL <code>'+esc(effUrl(p.base_url))+'</code> <button class="small" onclick="cp(\''+esc(effUrl(p.base_url))+'\')">复制</button></span>' +
@@ -659,7 +541,6 @@ function renderProvider(p, forceOpen){
       (isAg ? '<button class="small" title="同步反重力 5 小时 / 每周额度（不消耗对话额度）" onclick="syncAgQuota()">同步额度</button>' : '') +
       (isWb ? '<button class="small" title="同步 CodeBuddy 积分与每模型使用倍率（不消耗积分）" onclick="syncWbQuota()">同步积分</button>' : '') +
       (isCopilot ? '<button class="small" title="同步 Copilot premium 月配额（只读 check-usage，不耗配额）" onclick="syncCopilotQuota()">同步配额</button>' : '') +
-      (isVolc ? '<button class="small" title="从火山官方 GetModelActivation 只读同步各基础模型免费推理额度" onclick="syncVolcQuota()">同步免费额度</button>' : '') +
       '<button class="small" title="勾选本渠道全部模型（进入可调列表）" onclick="bulkEnable(\''+p.id+'\', true)">全选模型</button>' +
       '<button class="small" title="取消勾选本渠道全部模型（退出可调列表与轮询）" onclick="bulkEnable(\''+p.id+'\', false)">全不选</button>' +
       '<button class="small" onclick="testModel(\''+p.id+'\',\''+esc(p.active_model||'')+'\')">测试当前模型</button>' +
@@ -669,7 +550,8 @@ function renderProvider(p, forceOpen){
       '<button class="small danger" onclick="delProvider(\''+p.id+'\',\''+esc(p.name)+'\')">删除渠道</button>' +
       paidBox + freeOnlyBox + hiddenHint +
     '</div>' +
-    (isAg ? renderAgQuota(p) : (isWb ? renderWbQuota(p) : (isCopilot ? renderCopilotQuota(p) : (isSn ? renderSnQuota(p) : (isVolc ? renderVolcQuota(p) : ''))))) +
+    blockBox +
+    (isAg ? renderAgQuota(p) : (isWb ? renderWbQuota(p) : (isCopilot ? renderCopilotQuota(p) : ''))) +
     (viewModels.length ? '<div class="order-hint">勾选 = 模型进入可调列表（auto 轮询与 Harness 单选都只用已勾选模型）；轮询按下列顺序进行（↑↓ 调整）。</div>' : '') +
     fetchErr +
     (viewModels.length ? catHtml :
@@ -716,8 +598,6 @@ function effUrl(base){
 
 // ---------------- 渠道种类识别 ----------------
 function provIcon(p){
-  if(isSnProvider(p)) return '✺';
-  if(isVolcProvider(p)) return '▲';
   if(isCopilotProvider(p)) return '⬡';
   if(isWbProvider(p)) return '◈';
   if(isAgProvider(p)) return '✦';
@@ -725,8 +605,6 @@ function provIcon(p){
   return '◇';
 }
 function provKindName(p){
-  if(isSnProvider(p)) return '商汤 SenseNova';
-  if(isVolcProvider(p)) return '火山方舟';
   if(isCopilotProvider(p)) return 'GitHub Copilot 反代';
   if(isWbProvider(p)) return '腾讯 CodeBuddy 反代';
   if(isAgProvider(p)) return '反重力反代';
@@ -756,25 +634,6 @@ function provQuotaLine(p){
       const one = g => g.state==='ok' ? '余 '+fmtNum(g.rem5!==null?g.rem5:g.remw) : (g.state==='cooldown'?'冷却中':(g.state==='empty'?'已用尽':'未同步'));
       return '<span class="chip">AG gemini '+one(g1)+' · claude '+one(g2)+'</span>';
     }
-    if(isSnProvider(p)){
-      const sq = STATE.sn_quota || {};
-      if(!sq.configured) return '<span class="chip">商汤积分待校准</span>';
-      const g = (sq.pools||{}).general || {};
-      return '<span class="chip">通用池 5h 余 '+fmtNum(Math.max(0,(g.cap_5h||0)-(g.used_5h||0)))+' / '+fmtNum(g.cap_5h||0)+' 积分</span>';
-    }
-    if(isVolcProvider(p)){
-      const vq = STATE.volc_quota || {};
-      if(!vq.configured) return '<span class="chip">火山免费额度待配置</span>';
-      if(!vq.synced_at) return '<span class="chip">火山额度未同步</span>';
-      let rem2 = 0, tot2 = 0, nfree2 = 0, errc = 0;
-      Object.values(vq.models||{}).forEach(mi => {
-        if(mi.error){ errc++; return; }
-        const t = Number(mi.total||0);
-        if(t){ tot2 += t; rem2 += Math.max(0, t - Number(mi.consumed||0)); nfree2++; }
-      });
-      if(errc && !nfree2) return '<span class="chip bad">火山额度查询失败 ×'+errc+'</span>';
-      return '<span class="chip">'+nfree2+' 模型 · 免费额度剩 '+fmtNum(rem2)+' / '+fmtNum(tot2)+'</span>';
-    }
     if(p.type === 'bailian'){
       const q = STATE.quota || {};
       const ks = Object.keys(q.entries || {});
@@ -794,8 +653,20 @@ function renderSide(){
   const sp = $('#sideProviders');
   if(sp){
     const ps = STATE.providers || [];
-    sp.innerHTML = ps.map(p =>
-      '<a href="#" class="'+(VIEW.name==='detail' && VIEW.pid===p.id ? 'on':'')+'" onclick="openProvider(\''+p.id+'\');return false"><span class="ico">'+provIcon(p)+'</span>'+esc(p.name)+'</a>').join('');
+    const item = p => '<a href="#" class="'+(VIEW.name==='detail' && VIEW.pid===p.id ? 'on':'')+'" onclick="openProvider(\''+p.id+'\');return false"><span class="ico">'+provIcon(p)+'</span>'+esc(p.name)+'</a>';
+    const grpStyle = 'padding:10px 14px 2px;font-size:11px;color:var(--sub,#8a93a6);letter-spacing:.5px';
+    const chanPools = (STATE.pools||[]).filter(isChanPool);
+    let html = '';
+    const grouped = new Set();
+    for(const pl of chanPools){
+      const provs = ps.filter(p => (pl.providers||[]).includes(p.id));
+      if(!provs.length) continue;
+      html += '<div style="'+grpStyle+'">◆ '+esc(pl.name)+'</div>' + provs.map(item).join('');
+      provs.forEach(p => grouped.add(p.id));
+    }
+    const rest = ps.filter(p => !grouped.has(p.id));
+    if(rest.length) html += (html ? '<div style="'+grpStyle+'">未归组</div>' : '') + rest.map(item).join('');
+    sp.innerHTML = html;
   }
   const no = $('#navOverview');
   if(no) no.className = VIEW.name==='overview' ? 'on' : '';
@@ -856,7 +727,7 @@ function renderTiles(){
   const ps = STATE.providers || [];
   let h = '<div class="tile" onclick="backToOverview()"><div class="t-ico">▦</div><div><div class="t-name">渠道总数</div><div class="t-num">'+ps.length+'<span class="t-sub"> 个渠道</span></div></div></div>';
   ps.forEach(p => {
-    h += '<div class="tile" onclick="openProvider(\''+p.id+'\')"><div class="t-ico">'+provIcon(p)+'</div><div><div class="t-name">'+esc(p.name)+'</div><div class="t-num">'+enabledCount(p)+'<span class="t-sub"> / '+(p.models||[]).length+' 模型</span></div></div></div>';
+    h += '<div class="tile" onclick="openProvider(\''+p.id+'\')"><div class="t-ico">'+provIcon(p)+'</div><div><div class="t-name">'+esc(p.name)+'</div><div class="t-num">'+enabledCount(p)+'<span class="t-sub"> / '+pvModels(p).length+' 模型</span></div></div></div>';
   });
   t.innerHTML = h;
 }
@@ -885,13 +756,13 @@ function authBoxHtml(p, withKey){
   }
   let keyRows = '';
   if(withKey){
-    const eu = effUrl(p.base_url);
+    const eu = p.base_url || '';
     keyRows = '<div class="quota-line"><span class="ag-wname" style="min-width:36px">URL</span>' +
       '<code>'+esc(eu)+'</code><button class="small" onclick="cp(\''+esc(eu)+'\')">复制</button></div>' +
       '<div class="quota-line"><span class="ag-wname" style="min-width:36px">Key</span>' +
       '<code>'+esc(maskKey(p.api_key))+'</code><button class="small" onclick="cp(\''+esc(p.api_key)+'\')">复制</button></div>';
   }
-  return '<details class="authbox" id="auth-'+p.id+'"'+(_openAuths.has('auth-'+p.id)?' open':'')+'><summary>配置与授权</summary>' +
+  return '<details class="authbox"><summary>配置与授权</summary>' +
     '<div class="auth-in">'+status+btns+'</div>' + keyRows + '</details>';
 }
 
@@ -903,90 +774,286 @@ function renderPanels(){
   if(!ps.length){ g.innerHTML = '<div class="card" style="padding:22px;color:var(--sub)">还没有渠道，点右上角「+ 添加渠道」创建第一个。</div>'; return; }
   const wbst = STATE.wb_status || {};
   g.innerHTML = ps.map(p => {
-    const eu = effUrl(p.base_url);
+    const rawUrl = p.base_url || '';
     return '<div class="pv">' +
       '<div class="pv-head"><span class="pv-ico">'+provIcon(p)+'</span><span class="pv-name">'+esc(p.name)+'</span><span class="chip">'+provKindName(p)+'</span>' +
       (isWbProvider(p) ? (wbst.logged_in ? '<span class="chip ok">WB 已登录</span>' : '<span class="chip bad">WB 未登录</span>') : '') +
+      (p.use_egress ? '<span class="chip">出海代理</span>' : '') +
       (p.allow_paid ? '<span class="chip warn">允许付费</span>' : '') +
       '</div>' +
       '<div class="pv-line">当前模型 <b>'+esc(p.active_model||'未选择')+'</b></div>' +
-      '<div class="pv-line">已勾选 <b>'+enabledCount(p)+' / '+(p.models||[]).length+'</b>'+provQuotaLine(p)+'</div>' +
-      '<div class="pv-line">URL <code>'+esc(eu)+'</code><button class="small" onclick="cp(\''+esc(eu)+'\')">复制</button></div>' +
-      authBoxHtml(p, true) +
+      '<div class="pv-line">已勾选 <b>'+enabledCount(p)+' / '+pvModels(p).length+'</b>'+provQuotaLine(p)+'</div>' +
+      '<div class="pv-line">URL <code>'+esc(rawUrl)+'</code><button class="small" onclick="cp(\''+esc(rawUrl)+'\')">复制</button></div>' +
+      '<div class="pv-line">Key <code>'+esc(maskKey(p.api_key))+'</code><button class="small" onclick="cp(\''+esc(p.api_key||'')+'\')">复制</button></div>' +
+      oauthLine(p) +
+      authBoxHtml(p, false) +
       '<div class="pv-foot"><button class="pv-go" onclick="openProvider(\''+p.id+'\')">进入管理 ›</button></div>' +
       '</div>';
   }).join('');
 }
 
-// ---------------- 总览：号池条 ----------------
-function renderPoolBar(){
-  const bar = $('#poolBar');
-  if(!bar) return;
-  const pools = STATE.pools || [];
-  if(!pools.length){ bar.innerHTML = ''; return; }
-  const ps = STATE.providers || [];
-  bar.innerHTML = pools.map(pl =>
-    '<span class="chip">'+esc(pl.name)+' · '+ps.filter(p => p.pool_id===pl.id).length+' 账号</span>' +
-    '<a href="#" onclick="renamePool(\''+pl.id+'\',\''+esc(pl.name)+'\');return false">改名</a>' +
-    (pools.length>1 ? '<a href="#" onclick="delPool(\''+pl.id+'\',\''+esc(pl.name)+'\');return false">删除</a>' : '')
-  ).join(' ');
+// ---------------- 总览：②渠道号池 / ③使用池 / ④分发 key ----------------
+// 分类口径（R57 2026-09-26 拍板，取代 R49 版）：渠道号池 = 绑有渠道的池（与上游品牌一一对应，
+// 成员只能从上游加/删，可点进详情页管理）；使用池 = 自由组合的模型池（不绑渠道，跨品牌随便勾）
+function isChanPool(pl){ return !!pl && pl.id !== '' && (!!pl.channel_pid || !!pl.channel_brand || (pl.providers||[]).length > 0); }
+function isUsePool(pl){ return !!pl && pl.id !== '' && !isChanPool(pl); }
+
+/* 渠道登录状态小标（OAuth 类渠道用） */
+function loginChip(p){
+  if(isWbProvider(p)){
+    const l = (STATE.wb_status||{}).logged_in;
+    return l ? '<span class="chip ok">已登录</span>' : '<span class="chip bad">未登录</span>';
+  }
+  if(isAgProvider(p)){
+    const n = ((STATE.ag_quota||{}).accounts||[]).filter(a=>a.ok).length;
+    return n ? '<span class="chip ok">'+n+' 账号在线</span>' : '<span class="chip bad">未授权</span>';
+  }
+  if(isCopilotProvider(p)){
+    const cq = STATE.copilot_quota || {};
+    return cq.login ? '<span class="chip ok">已登录</span>' : '<span class="chip bad">未登录</span>';
+  }
+  return '';
 }
 
-// ---------------- 号池分组面板（全池共用 + 每号池自己的 key / auto 轮询） ----------------
-function maskKey(k){ k = String(k||''); return k ? k.slice(0,7)+'…'+k.slice(-4) : '未生成'; }
+/* 渠道卡上的 OAuth 登录入口行（登录态掉了直接登回） */
+function oauthLine(p){
+  if(isWbProvider(p)){
+    const l = (STATE.wb_status||{}).logged_in;
+    return '<div class="pv-line">'+loginChip(p)+'<button class="small auth-wb" onclick="startWbAuth(this)">'+(l?'重新登录':'登回 WorkBuddy')+'</button></div>';
+  }
+  if(isAgProvider(p)){
+    const n = ((STATE.ag_quota||{}).accounts||[]).filter(a=>a.ok).length;
+    return '<div class="pv-line">'+loginChip(p)+'<button class="small auth-ag" onclick="startAgAuth(this)">'+(n?'重新授权':'登回反重力')+'</button></div>';
+  }
+  if(isCopilotProvider(p)){
+    return '<div class="pv-line">'+loginChip(p)+'<span class="q-num">登录态由 copilot-api 容器维护，异常时在「配置与授权」处理</span></div>';
+  }
+  return '';
+}
 
-function renderPoolPanel(){
-  const el = $('#poolPanel');
+function renderChanPools(){
+  const el = $('#chanPoolPanel');
   if(!el) return;
   const ps = STATE.providers || [];
   const eu = effUrl(STATE.hub_base || 'http://127.0.0.1:8787/v1');
-  const eu0 = effUrl(STATE.hub_base || 'http://127.0.0.1:8787/v1');
-  let h = '<div class="pp-head">接入密钥 · 固定地址 <code>'+esc(eu0)+'</code> · 任一 key 均可调用 /v1</div>';
-  h += '<div class="pp-row"><span class="pp-name">主 key</span><code class="pp-key">'+esc(maskKey(STATE.hub_key))+'</code>'
-     + '<button class="small" onclick="cp(\''+esc(STATE.hub_key||'')+'\')">复制</button>'
-     + '<span class="q-num">dsh 与既有客户端在用，更换需走 dsh 同步</span></div>';
-  for(const k of (STATE.hub_keys||[])){
+  const pools = (STATE.pools||[]).filter(isChanPool);
+  if(!pools.length){
+    el.innerHTML = '<div class="q-num" style="padding:10px 2px">还没有渠道号池——点右上角「+ 添加渠道」，保存后自动按品牌归并/创建渠道号池。</div>';
+    return;
+  }
+  let h = '';
+  for(const pl of pools){
+    const provs = ps.filter(p => (pl.providers||[]).includes(p.id));
+    const provChips = provs.map(p => '<span class="pill">'+esc(p.name)+' '+loginChip(p)+'</span>').join('') || '<span class="cell-muted">（空）</span>';
+    const mcnt = (pl.models||[]).length;
+    h += '<div class="pp-pool">'
+       + '<div class="pp-row"><span class="pp-name">◆ '+esc(pl.name)+'</span>'
+       + '<span class="chip">'+provs.length+' 账号</span>'
+       + (mcnt ? '<span class="chip">'+mcnt+' 模型</span>' : '')
+       + '</div>'
+       + '<div class="pp-row"><span class="pp-name">URL</span><code class="pp-key">'+esc(eu)+'</code><button class="small" onclick="cp(\''+esc(eu)+'\')">复制</button>'
+       + '<span class="pp-name">key</span><code class="pp-key">'+esc(maskKey(pl.key))+'</code>'
+       + '<button class="small" onclick="cp(\''+esc(pl.key||'')+'\')">复制</button>'
+       + '<button class="small" onclick="resetPoolKey(\''+pl.id+'\')">重置key</button></div>'
+       + '<div class="pp-sub">渠道：'+provChips+' · 池内 auto 轮询</div>'
+       + '<div class="pp-ops">'
+       + '<a href="#" onclick="openChanPoolDetail(\''+pl.id+'\');return false">详情</a>'
+       + '<a href="#" onclick="openPoolPicker(null,\''+pl.id+'\');return false">＋ 从这里建使用池</a>'
+       + '<a href="#" onclick="renamePool(\''+pl.id+'\',\''+esc(pl.name)+'\');return false">改名</a>'
+       + '</div></div>';
+  }
+  el.innerHTML = h;
+}
+
+// ---------------- 渠道号池详情页（R57 2026-09-26）：成员只能从所绑渠道（上游）加/删 ----------------
+const CHAT_CATS_FE = ['文本生成','多模态','音频'];
+
+function chanPoolProviders(pl){
+  return (STATE.providers||[]).filter(p => (pl.providers||[]).includes(p.id));
+}
+
+/* 池的有效成员 [pid::model]：显式列表优先；未显式勾选时 = 所绑渠道已勾选的可对话免费模型（跟随上游自动） */
+function chanPoolEffectiveMembers(pl){
+  if((pl.models||[]).length) return pl.models.slice();
+  const out = [];
+  for(const p of chanPoolProviders(pl)){
+    const disabled = new Set(p.disabled_models||[]);
+    for(const m of orderedModels(p)){
+      if(disabled.has(m)) continue;
+      if(!CHAT_CATS_FE.includes(catOf(m))) continue;
+      if(p.type === 'bailian' && qState(m) !== 'free_ok') continue;
+      out.push(p.id + '::' + m);
+    }
+  }
+  return out;
+}
+
+function openChanPoolDetail(poolId){ VIEW = {name:'chanPool', pid:poolId}; saveView(); render(); window.scrollTo(0,0); }
+
+function renderChanPoolDetail(){
+  const pl = (STATE.pools||[]).find(x => x.id === VIEW.pid);
+  if(!pl || !isChanPool(pl)){ backToOverview(); return; }
+  const provs = chanPoolProviders(pl);
+  const dynamic = !(pl.models||[]).length;
+  const members = new Set(chanPoolEffectiveMembers(pl));
+  let h = '<div class="back-row"><button onclick="backToOverview()">‹ 返回总览</button>'
+        + '<span style="font-size:17px;font-weight:700">◆ '+esc(pl.name)+'</span>'
+        + '<span class="q-num">渠道号池与上游品牌一一对应，成员只能从这里绑定的渠道中加入/移除'+(dynamic ? ' · 当前「跟随上游自动」' : '')+'</span></div>';
+  if(dynamic){
+    h += '<div class="pp-sub" style="padding:8px 2px">当前为「跟随上游自动」：池内成员 = 所绑渠道已勾选的可对话模型。点过「加入 / 移除」后会固化为显式名单，之后上游变化不再自动跟随。</div>';
+  }
+  for(const p of provs){
+    const ms = orderedModels(p);
+    const disabled = new Set(p.disabled_models||[]);
+    h += '<div class="card" style="margin:10px 0;padding:12px">'
+       + '<div class="pp-row"><span class="pp-name">'+provIcon(p)+' '+esc(p.name)+'</span>'
+       + '<span class="chip">'+ms.length+' 模型（上游）</span></div>';
+    if(!ms.length){
+      h += '<div class="q-num" style="padding:6px 2px">该渠道暂无模型，请到渠道管理里刷新。</div>';
+    }
+    for(const m of ms){
+      const key = p.id + '::' + m;
+      const inPool = members.has(key);
+      const qchip = p.type === 'bailian'
+        ? (qState(m) === 'free_ok' ? '<span class="chip ok">免费额度</span>' : '<span class="chip warn">无免费额度</span>')
+        : '';
+      const dis = disabled.has(m) ? '<span class="chip bad">渠道已停用</span>' : '';
+      h += '<div class="pp-row" style="border-top:1px solid var(--line,#e6e9f0);padding:6px 2px">'
+         + '<span class="pp-name" style="font-weight:400">'+esc(m)+'</span>'
+         + '<span class="chip">'+esc(catOf(m))+'</span>' + qchip + dis
+         + (inPool
+             ? '<button class="small" onclick="chanPoolRemove(\''+pl.id+'\',\''+esc(key)+'\')">移除</button>'
+             : '<button class="small" onclick="chanPoolAdd(\''+pl.id+'\',\''+esc(key)+'\')">加入</button>')
+         + '</div>';
+    }
+    h += '</div>';
+  }
+  $('#detailSec').innerHTML = h;
+}
+
+async function chanPoolAdd(poolId, key){
+  const pl = (STATE.pools||[]).find(x=>x.id===poolId);
+  if(!pl) return;
+  const pid = key.split('::')[0];
+  const model = key.slice(pid.length + 2);
+  const ms = chanPoolEffectiveMembers(pl);
+  if(!ms.includes(key)) ms.push(key);
+  try{
+    const p = (STATE.providers||[]).find(x=>x.id===pid);
+    if(p && (p.disabled_models||[]).includes(model)){
+      await api('/api/providers/'+pid+'/models/enabled', 'POST', {model, enabled:true});
+    }
+    await api('/api/pools/'+poolId, 'PUT', {models: ms});
+    toast('已加入 ' + model);
+    await load();
+  }catch(e){ toast('加入失败：' + e.message, true); }
+}
+
+async function chanPoolRemove(poolId, key){
+  const pl = (STATE.pools||[]).find(x=>x.id===poolId);
+  if(!pl) return;
+  const ms = chanPoolEffectiveMembers(pl).filter(x => x !== key);
+  try{
+    await api('/api/pools/'+poolId, 'PUT', {models: ms});
+    toast('已移除 ' + key.split('::').pop());
+    await load();
+  }catch(e){ toast('移除失败：' + e.message, true); }
+}
+
+function renderUsePools(){
+  const el = $('#usePoolPanel');
+  if(!el) return;
+  const pools = (STATE.pools||[]).filter(isUsePool);
+  if(!pools.length){
+    el.innerHTML = '<div class="q-num" style="padding:10px 2px">还没有使用池——在②渠道号池点「＋ 从这里建使用池」按品牌勾选，或点上方「+ 新建使用池」从全部渠道勾选。</div>';
+    return;
+  }
+  let h = '';
+  for(const pl of pools){
+    const names = (pl.models||[]).map(s => esc(String(s).split('::').pop())).join('、');
+    h += '<div class="pp-pool">'
+       + '<div class="pp-row"><span class="pp-name">◆ '+esc(pl.name)+'</span>'
+       + '<span class="chip">'+(pl.models||[]).length+' 模型 · 跨渠道</span>'
+       + '<code class="pp-key">'+esc(maskKey(pl.key))+'</code>'
+       + '<button class="small" onclick="cp(\''+esc(pl.key||'')+'\')">复制</button>'
+       + '<button class="small" onclick="resetPoolKey(\''+pl.id+'\')">重置key</button></div>'
+       + '<div class="pp-sub">模型：'+names+' · 池 key 调用时跨渠道自动调度</div>'
+       + '<div class="pp-ops">'
+       + '<a href="#" onclick="openPoolPicker(\''+pl.id+'\');return false">编辑模型</a>'
+       + '<a href="#" onclick="renamePool(\''+pl.id+'\',\''+esc(pl.name)+'\');return false">改名</a>'
+       + ((STATE.pools||[]).length>1 ? '<a href="#" onclick="delPool(\''+pl.id+'\',\''+esc(pl.name)+'\');return false">删除</a>' : '')
+       + '</div></div>';
+  }
+  el.innerHTML = h;
+}
+
+function renderAccess(){
+  const el = $('#accessPanel');
+  if(!el) return;
+  const eu = effUrl(STATE.hub_base || 'http://127.0.0.1:8787/v1');
+  const poolName = {};
+  for(const pl of (STATE.pools||[])) poolName[pl.id] = pl.name;
+  let h = '<div class="pp-head">接入地址固定 <code>'+esc(eu)+'</code> · 任一 key + 该地址即可调 /v1</div>'
+       + '<div class="pp-row"><span class="pp-name">主 key</span><code class="pp-key">'+esc(maskKey(STATE.hub_key))+'</code>'
+       + '<button class="small" onclick="cp(\''+esc(STATE.hub_key||'')+'\')">复制</button>'
+       + '<span class="q-num">全池权限 · dsh 与既有客户端在用，更换需走 dsh 同步</span></div>';
+  const keys = STATE.hub_keys || [];
+  if(!keys.length){
+    h += '<div class="q-num" style="padding:6px 2px">还没有分发子 key——挂在某个池下、可限速限量，按 key 监控用量。</div>';
+  }
+  for(const k of keys){
+    const q = k.quota || {};
+    const qtxt = [q.rpm ? q.rpm+' 次/分' : '', q.daily_tokens ? '日 '+fmtNum(q.daily_tokens)+' tok' : '', q.max_tokens ? '单次≤'+fmtNum(q.max_tokens) : ''].filter(Boolean).join(' · ') || '不限';
+    const poolTxt = k.pool_id ? (poolName[k.pool_id] || k.pool_id) : '全部号池';
     h += '<div class="pp-row"><span class="pp-name">'+esc(k.name)+'</span>'
        + '<code class="pp-key">'+esc(maskKey(k.key))+'</code>'
        + '<button class="small" onclick="cp(\''+esc(k.key)+'\')">复制</button>'
        + '<button class="small" onclick="resetKey(\''+esc(k.id)+'\')">重置</button>'
        + '<button class="small" onclick="delKey(\''+esc(k.id)+'\')">删除</button>'
-       + '<span class="q-num">建 '+esc(k.created_at||'')+'</span></div>';
+       + '<span class="chip">'+esc(poolTxt)+'</span>'
+       + '<span class="q-num">'+esc(qtxt)+'</span>'
+       + '<span class="q-num" id="usage-'+esc(k.id)+'">用量读取中…</span></div>';
   }
-  h += '<div class="pp-ops"><button class="small" onclick="createKey()">＋ 创建 key</button>'
-     + '<span class="q-num">key 疑似泄露点「重置」立即换新；接入地址固定不可改</span></div>';
-  h += '<div class="pp-head">全部号池共用 · dsh 分组「Hub · 全部号池」（auto = 跨全部号池大轮询）</div>';
-  h += '<div class="pp-row"><span class="pp-name">key</span><code class="pp-key">'+esc(maskKey(STATE.hub_key))+'</code>'
-     + '<button class="small" onclick="cp(\''+esc(STATE.hub_key||'')+'\')">复制</button>'
-     + '<span class="pp-name">URL</span><code>'+esc(eu)+'</code>'
-     + '<button class="small" onclick="cp(\''+esc(eu)+'\')">复制</button></div>';
-  for(const pl of (STATE.pools||[])){
-    if(!pl.id) continue;
-    const isMp = (pl.models||[]).length > 0;
-    const provs = ps.filter(p => p.pool_id === pl.id);
-    h += '<div class="pp-pool">';
-    h += '<div class="pp-row"><span class="pp-name">◆ '+esc(pl.name)+'</span>'
-       + '<span class="chip">'+(isMp ? '模型池 · '+(pl.models||[]).length+' 模型' : '渠道池 · '+provs.length+' 账号')+'</span>'
-       + (pl.url ? '<span class="chip">原渠道直连</span>' : '')
-       + '<code class="pp-key">'+esc(maskKey(pl.key))+'</code>'
-       + '<button class="small" onclick="cp(\''+esc(pl.key||'')+'\')">复制</button>'
-       + '<button class="small" onclick="resetPoolKey(\''+pl.id+'\')">重置key</button>'
-       + (pl.url ? '<span class="pp-name">URL</span><code>'+esc(pl.url)+'</code><button class="small" onclick="cp(\''+esc(pl.url)+'\')">复制</button>' : '')
-       + '</div>';
-    if(isMp){
-      const names = (pl.models||[]).map(s => esc(String(s).split('::').pop())).join('、');
-      h += '<div class="pp-sub">模型：'+names+(pl.url ? ' · <b>原渠道直连池</b>：URL+key 直接调用百炼原生接口（视频/语音站内不中转，勿点重置key）' : '')+'</div>';
-    }else{
-      h += '<div class="pp-sub">渠道：'+(provs.map(p=>esc(p.name)).join('、')||'（空）')+' · auto 在池内轮询</div>';
-    }
-    h += '<div class="pp-ops">'
-       + '<a href="#" onclick="openPoolPicker(\''+pl.id+'\');return false">编辑模型</a>'
-       + '<a href="#" onclick="renamePool(\''+pl.id+'\',\''+esc(pl.name)+'\');return false">改名</a>'
-       + ((STATE.pools||[]).length>1 ? '<a href="#" onclick="delPool(\''+pl.id+'\',\''+esc(pl.name)+'\');return false">删除</a>' : '')
-       + '</div>';
-    h += '</div>';
-  }
+  h += '<div class="pp-ops"><button class="small" onclick="createBoundKey()">＋ 创建分发 key（挂池+限量）</button>'
+     + '<button class="small" onclick="createKey()">＋ 创建全池 key</button>'
+     + '<span class="q-num">key 疑似泄露点「重置」立即换新</span></div>';
   el.innerHTML = h;
+  fillKeyUsages(keys);
+}
+
+async function fillKeyUsages(keys){
+  await Promise.all((keys||[]).map(async k => {
+    const el = document.getElementById('usage-'+k.id);
+    if(!el) return;
+    try{
+      const u = await api('/api/keys/'+k.id+'/usage');
+      el.textContent = '今日 '+fmtNum((u.today||{}).tokens_used||0)+' tok · 本分钟 '+((u.this_minute||{}).requests||0)+' 次';
+    }catch(e){ el.textContent = '用量暂不可读'; }
+  }));
+}
+
+async function createBoundKey(){
+  const pools = STATE.pools || [];
+  if(!pools.length){ toast('先建号池再分发 key', true); return; }
+  const menu = pools.map((pl,i) => (i+1)+'. '+pl.name+(isUsePool(pl) ? '（使用池）' : '（渠道池）')).join('\n');
+  const pick = prompt('挂在哪个号池下？输入序号：\n'+menu, '1');
+  if(pick === null) return;
+  const idx = parseInt(pick) - 1;
+  if(!(idx >= 0 && idx < pools.length)){ toast('序号无效', true); return; }
+  const name = prompt('key 名称（给谁 / 哪个场景用）：', '');
+  if(name === null) return;
+  const rpm = prompt('每分钟限次（留空 = 不限）：', '');
+  if(rpm === null) return;
+  const day = prompt('每日 token 上限（留空 = 不限）：', '');
+  if(day === null) return;
+  const quota = {};
+  if(rpm && parseInt(rpm) > 0) quota.rpm = parseInt(rpm);
+  if(day && parseInt(day) > 0) quota.daily_tokens = parseInt(day);
+  try{
+    const r = await api('/api/keys', 'POST', {name: name.trim(), pool_id: pools[idx].id, quota});
+    toast('已创建分发 key「'+r.name+'」，挂在「'+pools[idx].name+'」');
+    await load();
+  }catch(e){ toast('创建失败：'+e.message, true); }
 }
 
 async function resetPoolKey(poolId){
@@ -1009,28 +1076,62 @@ async function syncDsh(){
 // ---------------- 模型组合号池：从全部号池模型勾选 ----------------
 let PICK = {poolId:null, sel:new Set()};
 
-function openPoolPicker(poolId){
+function openPoolPicker(poolId, chanPoolId){
   const pl = poolId ? (STATE.pools||[]).find(x=>x.id===poolId) : null;
+  const src = chanPoolId ? (STATE.pools||[]).find(x=>x.id===chanPoolId) : null;
   PICK = {poolId: poolId||null, sel: new Set(pl?(pl.models||[]):[])};
+  const provList = src ? (STATE.providers||[]).filter(p => (src.providers||[]).includes(p.id)) : (STATE.providers||[]);
   let h = '<div class="mpm-card">'
-       + '<div class="mpm-head">'+(pl ? '编辑号池「'+esc(pl.name)+'」的模型' : '从全部号池模型中勾选，组合为一个号池')+'</div>'
-       + '<div class="mpm-name">名称 <input id="mpmName" value="'+esc(pl?pl.name:'')+'" placeholder="号池 ' + (((STATE.pools||[]).length)+1) + '"></div>'
+       + '<div class="mpm-head">'+(pl ? '编辑使用池「'+esc(pl.name)+'」的模型' : (src ? '从渠道号池「'+esc(src.name)+'」勾选模型，组合为使用池' : '从全部渠道中勾选模型，组合为使用池'))+'</div>'
+       + '<div class="mpm-name">名称 <input id="mpmName" value="'+esc(pl?pl.name:(src?src.name:''))+'" placeholder="使用池 ' + (((STATE.pools||[]).length)+1) + '"></div>'
+       + '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;font-size:12px;color:var(--sub)">'
+       + '<button class="small" title="勾选列出的全部可用模型（渠道已停用的除外）" onclick="mpmSetAll(true)">全选可用</button>'
+       + '<button class="small" title="清空全部勾选" onclick="mpmSetAll(false)">全不选</button>'
+       + '<span>已勾 <b id="mpmCnt">0</b> 个</span></div>'
        + '<div class="mpm-list">';
-  for(const p of (STATE.providers||[])){
-    const ms = p.models || [];
+  for(const p of provList){
+    const ms = orderedModels(p);
     if(!ms.length) continue;
-    h += '<div class="mpm-prov">'+esc(p.name)+' <span class="chip">'+ms.length+'</span></div>';
+    h += '<div class="mpm-group">'
+       + '<div class="mpm-prov">'+esc(p.name)+' <span class="chip">'+ms.length+'</span>'
+       + ' <a href="#" style="margin-left:8px" title="勾选本渠道全部可用模型" onclick="mpmSetProv(this,true);return false">全选</a>'
+       + ' <a href="#" title="清空本渠道勾选" onclick="mpmSetProv(this,false);return false">全不选</a></div>';
     const dis = new Set(p.disabled_models||[]);
     for(const m of ms){
       const val = p.id+'::'+m;
       h += '<label class="mpm-item'+(dis.has(m)?' dim':'')+'"><input type="checkbox" value="'+esc(val)+'"'
-         + (PICK.sel.has(val)?' checked':'') + '> '+esc(m)+(dis.has(m)?'（渠道已停用）':'')+'</label>';
+         + (PICK.sel.has(val)?' checked':'') + (dis.has(m)?' data-dis="1"':'') + ' onchange="mpmCount()"> '+esc(m)+(dis.has(m)?'（渠道已停用）':'')+'</label>';
     }
+    h += '</div>';
   }
   h += '</div><div class="mpm-foot"><button class="primary" onclick="savePoolModels()">保存</button>'
      + '<button onclick="closePoolPicker()">取消</button><span id="mpmMsg" class="quota-line"></span></div></div>';
   $('#mpModal').innerHTML = h;
   $('#mpModal').style.display = 'flex';
+  mpmCount();
+}
+
+function mpmSetAll(on){
+  document.querySelectorAll('#mpModal .mpm-item input[type=checkbox]').forEach(i=>{
+    if(on && i.dataset.dis) return;  // 全选只勾渠道未停用的可用模型
+    i.checked = on;
+  });
+  mpmCount();
+}
+
+function mpmSetProv(a, on){
+  const g = a.closest('.mpm-group');
+  if(!g) return;
+  g.querySelectorAll('.mpm-item input[type=checkbox]').forEach(i=>{
+    if(on && i.dataset.dis) return;
+    i.checked = on;
+  });
+  mpmCount();
+}
+
+function mpmCount(){
+  const el = document.getElementById('mpmCnt');
+  if(el) el.textContent = document.querySelectorAll('#mpModal .mpm-item input:checked').length;
 }
 
 function closePoolPicker(){ $('#mpModal').style.display = 'none'; }
@@ -1066,15 +1167,20 @@ function render(){
   renderSide();
   renderCfg();
   const isDetail = VIEW.name === 'detail' && (STATE.providers||[]).some(x => x.id === VIEW.pid);
-  $('#overviewSec').style.display = isDetail ? 'none' : '';
-  $('#detailSec').style.display = isDetail ? '' : 'none';
+  const isChanPoolView = VIEW.name === 'chanPool' && (STATE.pools||[]).some(x => x.id === VIEW.pid && isChanPool(x));
+  const inDetail = isDetail || isChanPoolView;
+  $('#overviewSec').style.display = inDetail ? 'none' : '';
+  $('#detailSec').style.display = inDetail ? '' : 'none';
   if(isDetail){
     renderDetail();
+  } else if(isChanPoolView){
+    renderChanPoolDetail();
   } else {
     renderTiles();
     renderPanels();
-    renderPoolBar();
-    renderPoolPanel();
+    renderChanPools();
+    renderUsePools();
+    renderAccess();
   }
   // Hub 统一 key
   const hk = STATE.hub_key || '';
@@ -1171,15 +1277,18 @@ function onTypeChange(){
 
 async function addProvider(){
   const body = {name: $('#f-name').value, type: $('#f-type').value,
-                base_url: $('#f-url').value, api_key: $('#f-key').value};
+                base_url: $('#f-url').value, api_key: $('#f-key').value,
+                use_egress: $('#f-egress').checked};
   if(!body.base_url){ toast('Base URL 必填', true); return; }
   $('#addMsg').textContent = '正在保存并拉取模型列表…';
   try{
     const p = await api('/api/providers', 'POST', body);
     $('#addMsg').textContent = '';
     toggleAdd();
-    toast(p.fetch_error ? '已保存，但模型拉取失败' : '已添加，拉到 ' + (p.models||[]).length + ' 个模型');
     await load();
+    const pl = (STATE.pools||[]).find(x => (x.providers||[]).includes(p.id));
+    toast((p.fetch_error ? '已保存，但模型拉取失败' : '已添加，拉到 ' + (p.models||[]).length + ' 个模型')
+      + (pl ? '，已自动归入渠道号池「' + pl.name + '」' : ''));
   }catch(e){ $('#addMsg').textContent = '保存失败：' + e.message; }
 }
 
@@ -1241,6 +1350,20 @@ async function bulkEnable(pid, enabled){
   await load();
 }
 
+async function bulkEnableCat(pid, cat, enabled){
+  const p = (STATE.providers||[]).find(x=>x.id===pid);
+  if(!p) return;
+  const ms = orderedModels(p).filter(m => catOf(m)===cat);
+  if(!ms.length){ toast('本分类没有模型', true); return; }
+  try{
+    await api('/api/providers/'+pid+'/models/enabled_bulk', 'POST', {enabled, models: ms});
+    toast((enabled ? '已全选' : '已取消勾选') + '「' + cat + '」' + ms.length + ' 个模型');
+  }catch(e){
+    toast('操作失败：' + e.message, true);
+  }
+  await load();
+}
+
 async function refreshModels(pid){
   toast('正在拉取模型列表…');
   const r = await api('/api/providers/'+pid+'/models/refresh', 'POST', {});
@@ -1287,6 +1410,15 @@ async function togglePaid(pid, on){
   await api('/api/providers/'+pid, 'PUT', {allow_paid: on});
   toast(on ? '已允许付费调用：测试与轮询可使用无免费额度的模型（会计费）' : '已关闭付费调用：仅使用免费额度');
   await load();
+}
+
+async function saveBlocklist(pid){
+  const lines = (document.getElementById('blkTxt-'+pid).value || '').split('\n').map(s => s.trim()).filter(Boolean);
+  try{
+    await api('/api/providers/'+pid, 'PUT', {model_blocklist: lines});
+    toast('过滤规则已保存（' + lines.length + ' 条）');
+    await load();
+  }catch(e){ toast('保存失败：' + e.message, true); }
 }
 
 async function toggleFreetier(){
@@ -1429,16 +1561,7 @@ async function pollWbAuth(){
 }
 
 async function load(){
-  // R52 防闪烁/点击失效：
-  // ①单飞：同一时刻只跑一次 load，重入只记一次补跑（防止并发全量重渲染叠加）
-  // ②R50 节流：后台同步成功后只在真拿到 ok/synced_at 时才重渲染；本页 10 分钟内同一类后台同步只试一次。
-  //   旧版同步成功后无条件 load()，云端 synced_at 不更新时形成 load→refresh→load 无限循环，
-  //   全量 innerHTML 重渲染持续闪烁，点击目标被 DOM 重建吞掉。
-  if(window._loadBusy){ window._loadPending = true; return; }
-  window._loadBusy = true;
-  try{
   _openCats = snapshotOpenCats();
-  _openAuths = snapshotOpenAuth();
   STATE = await api('/api/state');
   if(STATE.cloud_mode){ document.querySelectorAll('.only-local').forEach(el=>{ el.style.display='none'; }); }
   render();
@@ -1449,6 +1572,9 @@ async function load(){
       const st = (STATE.ag_quota||{}).synced_at || '';
       const tSrv = Date.parse((STATE.server_time||'').replace(' ','T'));
       const tSyn = st ? Date.parse(st.replace(' ','T')) : 0;
+      // R50 防死循环：同步失败（如云端无本地 CLI，synced_at 永不更新）时若照旧 load() 重渲染，
+      // 会形成 load→refresh→load 无限循环：页面持续闪烁、点击目标被重建全部落空。
+      // 规则：①本页 10 分钟内只试一次（_agBgTry 节流）②只有真的同步成功（ok/synced_at）才 load() 重渲染。
       if((!st || (tSrv - tSyn) > 600000) && (!window._agBgTry || (Date.now()-window._agBgTry) > 600000)){
         window._agBgTry = Date.now();
         window._agSyncing = true;
@@ -1490,26 +1616,6 @@ async function load(){
       }
     }
   }catch(e){}
-  // 火山方舟免费额度：已配置 AK 且超过 10 分钟未同步 → 后台只读同步一次（GetModelActivation，不计费）
-  try{
-    const hasVolc = (STATE.providers||[]).some(isVolcProvider);
-    if(hasVolc && (STATE.volc_quota||{}).configured && !window._volcSyncing){
-      const st4 = (STATE.volc_quota||{}).synced_at || '';
-      const tSrv4 = Date.parse((STATE.server_time||'').replace(' ','T'));
-      const tSyn4 = st4 ? Date.parse(st4.replace(' ','T')) : 0;
-      if((!st4 || (tSrv4 - tSyn4) > 600000) && (!window._volcBgTry || (Date.now()-window._volcBgTry) > 600000)){
-        window._volcBgTry = Date.now();
-        window._volcSyncing = true;
-        api('/api/volc/quota/refresh', 'POST', {})
-          .then(r=>{ window._volcSyncing = false; if(r && (r.ok || r.synced_at)) load(); })
-          .catch(()=>{ window._volcSyncing = false; });
-      }
-    }
-  }catch(e){}
-  } finally {
-    window._loadBusy = false;
-    if(window._loadPending){ window._loadPending = false; load(); }
-  }
 }
 
 async function syncWbQuota(){

@@ -33,12 +33,19 @@
       <button id="btnStart" class="primary" onclick="startDsh()">启动 DeepSeek Harness</button>
     </div>
   </div>
+  <div id="chanCard" class="card" style="display:none; margin:14px 18px 22px; max-width:960px; padding:16px 18px">
+    <h2 style="font-size:15px; margin:0 0 6px; display:flex; align-items:center; gap:8px">本地通道 <span id="chanChip" class="chip">检测中…</span></h2>
+    <div id="chanDesc" style="font-size:12px; color:var(--sub); line-height:1.6; margin-bottom:10px"></div>
+    <div id="chanBtns" style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px"></div>
+    <div id="chanResults" style="font-size:12px; color:var(--sub); line-height:1.7"></div>
+  </div>
 </div>
 <div id="toast"></div>
 
 <script src="/static/hub.js?v=6"></script>
 <script>
 let STATE = {running: false, url: 'http://127.0.0.1:3080/', cloud: false, port: 3080};
+let HUBKEY = '';
 const $ = s => document.querySelector(s);
 
 function toast(msg, isErr){
@@ -51,6 +58,18 @@ function toast(msg, isErr){
 
 async function api(path, method, body){
   const opt = {method: method||'GET', headers:{'Content-Type':'application/json'}};
+  if(body !== undefined) opt.body = JSON.stringify(body);
+  const r = await fetch(path, opt);
+  if(!r.ok){
+    let msg = 'HTTP ' + r.status;
+    try{ const j = await r.json(); msg = (j.error && j.error.message) || j.message || j.detail || msg; }catch(e){}
+    throw new Error(msg);
+  }
+  return await r.json();
+}
+
+async function chanApi(path, method, body){
+  const opt = {method: method||'GET', headers:{'Content-Type':'application/json','Authorization':'Bearer ' + HUBKEY}};
   if(body !== undefined) opt.body = JSON.stringify(body);
   const r = await fetch(path, opt);
   if(!r.ok){
@@ -105,6 +124,7 @@ async function refresh(){
     $('#stChip').textContent = 'Hub 接口异常';
     $('#stChip').className = 'chip bad';
   }
+  chanRefresh();
 }
 
 async function startDsh(){
@@ -177,6 +197,107 @@ function renderCloud(st){
       toast('本机 dsh 未运行：请双击桌面「LLM Hub-日常开发」启动器', true);
     }
   };
+}
+
+// ---- 本地通道（R75）：云端面板 ↔ 本机 agent 的命令/数据桥 ----
+async function ensureHubKey(){
+  if(HUBKEY){ return true; }
+  try{
+    const s = await api('/api/state');
+    HUBKEY = s.hub_key || '';
+  }catch(e){}
+  return !!HUBKEY;
+}
+
+async function chanRefresh(){
+  if(!STATE.cloud){ $('#chanCard').style.display = 'none'; return; }
+  $('#chanCard').style.display = 'block';
+  if(!(await ensureHubKey())){
+    $('#chanChip').textContent = '无法获取 Hub Key';
+    $('#chanChip').className = 'chip bad';
+    $('#chanDesc').textContent = '云端面板未能取到 Hub 统一 key，本地通道不可用。';
+    return;
+  }
+  let st = null;
+  try{
+    st = await chanApi('/api/channel/status');
+  }catch(e){
+    $('#chanChip').textContent = '状态异常';
+    $('#chanChip').className = 'chip bad';
+    $('#chanDesc').textContent = '读取本地通道状态失败：' + e.message;
+    return;
+  }
+  renderChan(st);
+}
+
+function renderChan(st){
+  const chip = $('#chanChip');
+  if(!st.enabled){
+    chip.textContent = '未开启';
+    chip.className = 'chip bad';
+    $('#chanDesc').innerHTML = '打开后，云端面板可通过本机 agent（随桌面启动器常驻）驱动你电脑上的 dsh：重扫模型列表、云端号池数据下发本机、本机数据上传云端、重启 dsh。通道用本地 data.json 的 Hub key 注册，关闭即断。';
+    $('#chanBtns').innerHTML = '<button class="primary" onclick="chanOpen()">打开本地通道</button>';
+  }else{
+    chip.textContent = st.online ? '已连接（本机 agent 在线）' : '已开启 · 等待本机 agent…';
+    chip.className = 'chip ' + (st.online ? 'ok' : '');
+    let desc = '本机 agent（hub_channel_agent）随桌面「LLM Hub-日常开发」启动器常驻，每 5 秒轮询领取命令。';
+    if(st.last_poll_age != null){ desc += ' 上次轮询 ' + Math.round(st.last_poll_age) + ' 秒前。'; }
+    if(!st.online){ desc += ' agent 未上线：请确认本机已运行桌面启动器（会自动拉起 agent），通道会自动连上。'; }
+    desc += ' 数据同步均为手动触发，双向操作前都会自动备份。';
+    $('#chanDesc').innerHTML = desc;
+    $('#chanBtns').innerHTML =
+      '<button class="small" onclick="chanCmd(\'scan\')">① 重扫 dsh 模型列表</button>' +
+      '<button class="small" onclick="chanCmd(\'pull_data\')">② 云端号池数据 → 本机</button>' +
+      '<button class="small" onclick="chanCmd(\'push_data\')">③ 本机数据 → 云端</button>' +
+      '<button class="small" onclick="chanCmd(\'restart_dsh\')">④ 重启本机 dsh</button>' +
+      '<button class="small" onclick="chanClose()">关闭本地通道</button>';
+  }
+  const pend = st.pending || [];
+  const res = (st.results || []).slice().reverse();
+  let html = '';
+  if(pend.length){ html += '<div>待执行：' + pend.map(c => esc(c.cmd) + '（排队于 ' + esc(c.ts || '') + '）').join('、') + '</div>'; }
+  if(res.length){
+    html += '<div style="margin-top:4px">最近结果：</div>' + res.slice(0, 5).map(r =>
+      '<div>· <b style="color:' + (r.ok ? 'var(--ok,#2e7d32)' : '#c62828') + '">' + (r.ok ? '成功' : '失败') + '</b> ' +
+      esc(r.id) + ' ' + esc((r.output || '').slice(0, 160)) + ' <span style="opacity:.6">' + esc(r.ts || '') + '</span></div>').join('');
+  }else if(st.enabled){
+    html += '<div>暂无命令记录。</div>';
+  }
+  $('#chanResults').innerHTML = html;
+}
+
+function esc(s){ return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+async function chanOpen(){
+  try{
+    const r = await chanApi('/api/channel/open', 'POST', {});
+    toast(r.ok ? '本地通道已打开——本机 agent 将在数秒内自动连上' : '打开失败');
+    await chanRefresh();
+  }catch(e){ toast('打开本地通道失败：' + e.message, true); }
+}
+
+async function chanClose(){
+  try{
+    const r = await chanApi('/api/channel/close', 'POST', {});
+    toast(r.ok ? '本地通道已关闭' : '关闭失败');
+    await chanRefresh();
+  }catch(e){ toast('关闭本地通道失败：' + e.message, true); }
+}
+
+async function chanCmd(cmd){
+  const tips = {
+    scan: '重新扫描所有号池的可用模型并更新 dsh 模型列表？',
+    pull_data: '把云端 hub 的号池/渠道数据下发到本机（覆盖本地 data.json，会自动备份；扫描器随后自动重扫）？建议之后点「重启本机 dsh」让新号池生效。',
+    push_data: '把本机 data.json 上传覆盖云端 hub 数据（云端会自动备份）？如果本机数据比云端旧，云端号池会被覆盖回旧版——建议仅在本地自定义修改后使用。',
+    restart_dsh: '重启你本机上的 dsh（注入最新号池 key，约 30 秒）？'
+  };
+  if(!window.confirm(tips[cmd] || ('执行 ' + cmd + ' ？'))){ return; }
+  try{
+    const r = await chanApi('/api/channel/command', 'POST', {cmd: cmd, note: 'panel'});
+    toast(r.ok ? '命令已入队，本机 agent 将在数秒内执行' : '命令入队失败', !r.ok);
+    setTimeout(chanRefresh, 4000);
+    setTimeout(chanRefresh, 12000);
+  }catch(e){ toast('命令下发失败：' + e.message, true); }
 }
 
 refresh();

@@ -5,6 +5,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>LLM Key Hub · 调用监控</title>
 <link rel="stylesheet" href="/static/hub.css?v=6">
+<style>
+.ch-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:14px}
+@media (max-width:1100px){.ch-grid{grid-template-columns:1fr}}
+.ch-box{background:var(--card2);border:1px solid var(--border-soft);border-radius:10px;padding:10px 10px 4px}
+.ch-title{font-size:12px;color:var(--sub);margin:0 0 4px 4px}
+.ch{width:100%;height:260px}
+</style>
 </head>
 <body>
 <aside class="sidebar">
@@ -23,7 +30,35 @@
     <div class="title">调用监控<small>经 Hub 轮询代理与页面测试的每一次调用 · 只记录，不做费用估计</small></div>
   </div>
 
+  <div class="card" id="chartsCard">
+    <div class="sec-title">图表总览<small>调用趋势 · 模型 / 渠道号池 / 使用号池分布 · 耗时对比 · 24 小时分布 —— 随调用记录自动刷新</small></div>
+    <div id="chartsEmpty" class="empty" style="display:none">还没有可绘制的调用数据——经 Hub 调用一次后，图表会自动出现。</div>
+    <div class="ch-grid" id="chGrid">
+      <div class="ch-box"><div class="ch-title">每日调用趋势（成功 / 失败 / 拦截）</div><div id="chTrend" class="ch"></div></div>
+      <div class="ch-box"><div class="ch-title">每日 Token 用量</div><div id="chTok" class="ch"></div></div>
+      <div class="ch-box"><div class="ch-title">模型调用量 Top10</div><div id="chModel" class="ch"></div></div>
+      <div class="ch-box"><div class="ch-title">模型 Token 用量 Top10</div><div id="chModelTok" class="ch"></div></div>
+      <div class="ch-box"><div class="ch-title">模型平均耗时对比</div><div id="chModelLat" class="ch"></div></div>
+      <div class="ch-box"><div class="ch-title">24 小时调用分布</div><div id="chHour" class="ch"></div></div>
+      <div class="ch-box"><div class="ch-title">渠道号池调用占比</div><div id="chCp" class="ch"></div></div>
+      <div class="ch-box"><div class="ch-title">渠道号池耗时对比（平均 / P50 / P95）</div><div id="chCpLat" class="ch"></div></div>
+      <div class="ch-box"><div class="ch-title">使用号池调用占比</div><div id="chUp" class="ch"></div></div>
+      <div class="ch-box"><div class="ch-title">调用来源分布</div><div id="chSrc" class="ch"></div></div>
+    </div>
+  </div>
+
   <div class="card">
+    <div class="sec-title">渠道号池耗时<small>上游耗时不可直接探测——这里按渠道所在号池归集「经 Hub 调用的实测耗时」（含代理调用与页面测试）</small></div>
+    <div id="cpRows"></div>
+  </div>
+
+  <div class="card">
+    <div class="sec-title">使用号池监控<small>按分发 key 绑定的号池归集调用；主 key（全池）与号池 key 直授也各占一行</small></div>
+    <div id="upRows"></div>
+  </div>
+
+  <div class="card">
+    <div class="sec-title">调用记录<small>最近 60 条 · 按模型统计与原始流水</small></div>
     <div id="logStats" class="p-meta" style="margin:0 0 8px">暂无调用记录</div>
     <div id="logModels"></div>
     <div class="p-ops" style="margin:10px 0 8px">
@@ -37,6 +72,7 @@
 </div>
 <div id="toast"></div>
 
+<script src="/static/echarts.min.js"></script>
 <script>
 const $ = s => document.querySelector(s);
 const esc = s => String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -122,9 +158,217 @@ function renderLogs(logs, st){
     }).join('') + '</tbody></table>';
 }
 
+// ---------------- R51：号池监控（渠道号池耗时 / 使用号池） ----------------
+function latCell(ms){
+  if(ms === null || ms === undefined) return '<span class="q-num">—</span>';
+  const cls = ms > 8000 ? 'bad' : (ms > 4000 ? 'warn' : '');
+  return '<span class="q-num"' + (cls ? ' style="color:var(--' + cls + ')"' : '') + '>' + fmtSec(ms) + '</span>';
+}
+
+function rateCell(r){
+  if(r.ok_rate === null || r.ok_rate === undefined) return '<span class="q-num">—</span>';
+  const cls = r.ok_rate >= 95 ? 'ok' : (r.ok_rate >= 80 ? 'warn' : 'bad');
+  return '<span class="chip ' + cls + '">' + r.ok_rate + '%</span>';
+}
+
+function poolTypeChip(t){
+  if(t === 'channel') return '';
+  if(t === 'usage') return ' <span class="chip blue">使用池</span>';
+  if(t === 'main') return ' <span class="chip blue">全池</span>';
+  if(t === 'deleted') return ' <span class="chip">已删除</span>';
+  if(t === 'legacy') return ' <span class="chip">旧日志</span>';
+  if(t === 'other') return ' <span class="chip">非渠道池</span>';
+  return '';
+}
+
+function renderChanPools(rows){
+  const el = $('#cpRows');
+  if(!rows || !rows.length){
+    el.innerHTML = '<div class="empty">还没有任何调用记录——经 Hub 代理调用一次，或在渠道卡片点「测试」，这里就会按渠道号池归集耗时。</div>';
+    return;
+  }
+  el.innerHTML = '<table><thead><tr><th>渠道号池</th><th>渠道</th><th style="width:7%">调用</th><th style="width:9%">成功率</th>' +
+    '<th style="width:9%">平均</th><th style="width:9%">P50</th><th style="width:9%">P95</th><th style="width:9%">最大</th>' +
+    '<th style="width:9%">tokens</th><th style="width:13%">最近调用</th></tr></thead><tbody>' +
+    rows.map(r => '<tr>' +
+      '<td><b>' + esc(r.label) + '</b>' + poolTypeChip(r.pool_type) + '</td>' +
+      '<td class="q-num">' + esc((r.providers || []).join('、') || '—') + '</td>' +
+      '<td>' + r.calls + '</td>' +
+      '<td>' + rateCell(r) + '</td>' +
+      '<td>' + latCell(r.avg_ms) + '</td>' +
+      '<td>' + latCell(r.p50_ms) + '</td>' +
+      '<td>' + latCell(r.p95_ms) + '</td>' +
+      '<td>' + latCell(r.max_ms) + '</td>' +
+      '<td>' + fmtNum(r.tokens) + '</td>' +
+      '<td class="q-num">' + esc((r.last_ts || '').slice(5) || '—') + '</td>' +
+    '</tr>').join('') + '</tbody></table>';
+}
+
+function renderUsePools(rows){
+  const el = $('#upRows');
+  if(!rows || !rows.length){
+    el.innerHTML = '<div class="empty">还没有分发 key 的调用记录——把子 key 挂到使用号池分发出去后，这里按池归集每次调用的耗时与用量。</div>';
+    return;
+  }
+  el.innerHTML = '<table><thead><tr><th>使用号池</th><th>key</th><th style="width:7%">调用</th><th style="width:9%">成功率</th>' +
+    '<th style="width:9%">平均</th><th style="width:9%">P50</th><th style="width:9%">P95</th><th style="width:9%">最大</th>' +
+    '<th style="width:9%">tokens</th><th style="width:13%">最近调用</th></tr></thead><tbody>' +
+    rows.map(r => '<tr>' +
+      '<td><b>' + esc(r.label) + '</b>' + poolTypeChip(r.pool_type) + '</td>' +
+      '<td class="q-num">' + esc((r.keys || []).join('、') || '—') + '</td>' +
+      '<td>' + r.calls + '</td>' +
+      '<td>' + rateCell(r) + '</td>' +
+      '<td>' + latCell(r.avg_ms) + '</td>' +
+      '<td>' + latCell(r.p50_ms) + '</td>' +
+      '<td>' + latCell(r.p95_ms) + '</td>' +
+      '<td>' + latCell(r.max_ms) + '</td>' +
+      '<td>' + fmtNum(r.tokens) + '</td>' +
+      '<td class="q-num">' + esc((r.last_ts || '').slice(5) || '—') + '</td>' +
+    '</tr>').join('') + '</tbody></table>';
+}
+
+// ---------------- R52：图表总览（ECharts，本地 /static/echarts.min.js，深空主题） ----------------
+const CH = {};
+const CH_PAL = ['#D4A24C','#34D399','#5B8FF9','#F5A524','#F0556B','#9A948A','#B678E8','#1FB6C9','#E8B06B','#7A8C3F'];
+const CH_TXT = '#9A948A';
+function chBase(){
+  return {
+    color: CH_PAL,
+    textStyle: {color: CH_TXT, fontSize: 11},
+    tooltip: {backgroundColor: '#16151A', borderColor: '#2B2823', textStyle: {color: '#EDEAE2', fontSize: 12}},
+    legend: {textStyle: {color: CH_TXT, fontSize: 10}, top: 0, itemWidth: 12, itemHeight: 8},
+  };
+}
+function chAxis(extra){
+  return Object.assign({
+    axisLine: {lineStyle: {color: '#2B2823'}},
+    axisTick: {show: false},
+    axisLabel: {color: CH_TXT, fontSize: 10},
+    splitLine: {lineStyle: {color: 'rgba(255,255,255,.05)'}},
+  }, extra || {});
+}
+function chOf(id){
+  if(!CH[id]) CH[id] = echarts.init(document.getElementById(id), null, {renderer: 'canvas'});
+  return CH[id];
+}
+function chEmpty(id){
+  chOf(id).setOption({title: {text: '暂无数据', left: 'center', top: 'center',
+    textStyle: {color: '#6B665C', fontSize: 12, fontWeight: 'normal'}}}, true);
+}
+function chDonut(id, rows){
+  if(!rows.length) return chEmpty(id);
+  const tot = rows.reduce((s, r) => s + r.value, 0);
+  chOf(id).setOption(Object.assign(chBase(), {
+    tooltip: Object.assign(chBase().tooltip, {trigger: 'item',
+      formatter: p => esc(p.name) + '<br/>' + p.value + ' 次（' + p.percent + '%）'}),
+    legend: {type: 'scroll', orient: 'vertical', right: 4, top: 'middle',
+      textStyle: {color: CH_TXT, fontSize: 10}, itemWidth: 10, itemHeight: 8, pageTextStyle: {color: CH_TXT}},
+    series: [{type: 'pie', radius: ['42%', '68%'], center: ['36%', '52%'],
+      label: {show: false}, itemStyle: {borderColor: '#16151A', borderWidth: 2},
+      emphasis: {label: {show: true, color: '#EDEAE2', fontSize: 12, formatter: '{b}\n{d}%'}},
+      data: rows}],
+    title: {text: fmtNum(tot) + ' 次', subtext: '总调用', left: '35%', top: '44%',
+      textAlign: 'center', textStyle: {color: '#EDEAE2', fontSize: 15}, subtextStyle: {color: CH_TXT, fontSize: 10}},
+  }), true);
+}
+function chHBar(id, rows, fmt){
+  if(!rows.length) return chEmpty(id);
+  chOf(id).setOption(Object.assign(chBase(), {
+    grid: {left: 8, right: 46, top: 8, bottom: 8, containLabel: true},
+    xAxis: chAxis({type: 'value', axisLabel: {color: CH_TXT, fontSize: 10, formatter: fmt || fmtNum}}),
+    yAxis: chAxis({type: 'category', inverse: true, splitLine: {show: false},
+      data: rows.map(r => r.name),
+      axisLabel: {color: CH_TXT, fontSize: 10, width: 120, overflow: 'truncate'}}),
+    series: [{type: 'bar', barMaxWidth: 14, data: rows.map(r => r.value),
+      itemStyle: {color: '#D4A24C', borderRadius: [0, 3, 3, 0]},
+      label: {show: true, position: 'right', color: CH_TXT, fontSize: 10, formatter: p => (fmt || fmtNum)(p.value)}}],
+  }), true);
+}
+function renderCharts(st){
+  if(!window.echarts){ $('#chartsCard').style.display = 'none'; return; }
+  if(!st || !st.total){
+    $('#chartsEmpty').style.display = '';
+    $('#chGrid').style.display = 'none';
+    return;
+  }
+  $('#chartsEmpty').style.display = 'none';
+  $('#chGrid').style.display = '';
+  const daily = st.daily || [];
+  const days = daily.map(d => d.day.slice(5));
+
+  // 1. 每日调用趋势（堆叠：成功/失败/拦截）
+  if(!daily.length) chEmpty('chTrend'); else chOf('chTrend').setOption(Object.assign(chBase(), {
+    grid: {left: 40, right: 14, top: 26, bottom: 24},
+    xAxis: chAxis({type: 'category', data: days}),
+    yAxis: chAxis({type: 'value', minInterval: 1}),
+    series: [
+      {name: '成功', type: 'bar', stack: 'c', barMaxWidth: 26, itemStyle: {color: '#34D399'}, data: daily.map(d => d.ok)},
+      {name: '失败', type: 'bar', stack: 'c', itemStyle: {color: '#F0556B'}, data: daily.map(d => d.fail)},
+      {name: '拦截', type: 'bar', stack: 'c', itemStyle: {color: '#9A948A'}, data: daily.map(d => d.blocked)},
+    ],
+  }), true);
+
+  // 2. 每日 Token 用量
+  if(!daily.length) chEmpty('chTok'); else chOf('chTok').setOption(Object.assign(chBase(), {
+    grid: {left: 52, right: 14, top: 14, bottom: 24},
+    xAxis: chAxis({type: 'category', data: days}),
+    yAxis: chAxis({type: 'value', axisLabel: {color: CH_TXT, fontSize: 10, formatter: fmtNum}}),
+    series: [{name: 'tokens', type: 'bar', barMaxWidth: 26, data: daily.map(d => d.tokens),
+      itemStyle: {color: {type: 'linear', x: 0, y: 0, x2: 0, y2: 1,
+        colorStops: [{offset: 0, color: '#E8B06B'}, {offset: 1, color: 'rgba(212,162,76,.25)'}]},
+        borderRadius: [3, 3, 0, 0]}}],
+  }), true);
+
+  // 3-5. 模型三图
+  const models = st.by_model || [];
+  chHBar('chModel', models.slice(0, 10).map(m => ({name: m.model, value: m.calls})));
+  chHBar('chModelTok', models.slice().sort((a, b) => b.tokens - a.tokens).slice(0, 10)
+    .map(m => ({name: m.model, value: m.tokens})));
+  chHBar('chModelLat', models.filter(m => m.avg_ms != null).sort((a, b) => b.avg_ms - a.avg_ms).slice(0, 10)
+    .map(m => ({name: m.model, value: +(m.avg_ms / 1000).toFixed(2)})), v => v + 's');
+
+  // 6. 24 小时分布
+  const hours = st.by_hour || [];
+  if(!hours.some(v => v)) chEmpty('chHour'); else chOf('chHour').setOption(Object.assign(chBase(), {
+    grid: {left: 36, right: 14, top: 14, bottom: 24},
+    xAxis: chAxis({type: 'category', data: hours.map((_, i) => i + '时')}),
+    yAxis: chAxis({type: 'value', minInterval: 1}),
+    series: [{type: 'bar', barMaxWidth: 14, data: hours,
+      itemStyle: {color: '#5B8FF9', borderRadius: [2, 2, 0, 0]}}],
+  }), true);
+
+  // 7. 渠道号池占比
+  chDonut('chCp', (st.by_channel_pool || []).map(r => ({name: r.label, value: r.calls})));
+
+  // 8. 渠道号池耗时对比（秒）
+  const cps = (st.by_channel_pool || []).filter(r => r.avg_ms != null);
+  if(!cps.length) chEmpty('chCpLat'); else chOf('chCpLat').setOption(Object.assign(chBase(), {
+    grid: {left: 40, right: 14, top: 26, bottom: 40},
+    xAxis: chAxis({type: 'category', data: cps.map(r => r.label),
+      axisLabel: {color: CH_TXT, fontSize: 10, interval: 0, rotate: cps.length > 4 ? 24 : 0}}),
+    yAxis: chAxis({type: 'value', axisLabel: {color: CH_TXT, fontSize: 10, formatter: v => v + 's'}}),
+    series: [
+      {name: '平均', type: 'bar', barMaxWidth: 16, itemStyle: {color: '#D4A24C'}, data: cps.map(r => +(r.avg_ms / 1000).toFixed(2))},
+      {name: 'P50', type: 'bar', barMaxWidth: 16, itemStyle: {color: '#34D399'}, data: cps.map(r => +((r.p50_ms || 0) / 1000).toFixed(2))},
+      {name: 'P95', type: 'bar', barMaxWidth: 16, itemStyle: {color: '#F0556B'}, data: cps.map(r => +((r.p95_ms || 0) / 1000).toFixed(2))},
+    ],
+  }), true);
+
+  // 9. 使用号池占比
+  chDonut('chUp', (st.by_usage_pool || []).map(r => ({name: r.label, value: r.calls})));
+
+  // 10. 调用来源
+  const SRC_NAME = {proxy: '代理调用', 'proxy-anthropic': '代理（Anthropic 协议）', test: '页面测试'};
+  chDonut('chSrc', Object.keys(st.by_source || {}).map(k => ({name: SRC_NAME[k] || k, value: st.by_source[k]})));
+}
+window.addEventListener('resize', () => { for(const k in CH) CH[k].resize(); });
+
 async function loadLogs(){
   try{
     const [lg, st] = await Promise.all([api('/api/logs?limit=60'), api('/api/logs/stats')]);
+    renderCharts(st);
+    renderChanPools(st.by_channel_pool || []);
+    renderUsePools(st.by_usage_pool || []);
     renderLogs(lg.logs || [], st);
   }catch(e){ /* 忽略，下轮再试 */ }
 }
