@@ -1066,6 +1066,18 @@ app.add_middleware(
 )
 
 
+# R91: Chrome Private Network Access——https 云端页面（hub.zeroxcore.tech）向内嵌的
+# 本机 127.0.0.1:8787 面板发探测/预检请求时，浏览器要求响应显式带
+# Access-Control-Allow-Private-Network: true，否则按私有网络访问拦截。
+@app.middleware("http")
+async def _allow_private_network(request, call_next):
+    resp = await call_next(request)
+    if (request.headers.get("access-control-request-private-network", "").lower() == "true"
+            or request.headers.get("origin", "").startswith("https://hub.zeroxcore.tech")):
+        resp.headers["Access-Control-Allow-Private-Network"] = "true"
+    return resp
+
+
 class ProviderIn(BaseModel):
     name: str
     type: str = "openai"          # openai | bailian
@@ -4108,7 +4120,7 @@ def api_harness_dsh_sync():
 CHANNEL_FILE = Path(os.environ.get("HUB_CHANNEL_FILE", str(DATA_FILE.parent / "channel.json")))
 _CHANNEL_LOCK = threading.Lock()
 _CHANNEL_ONLINE_TTL = 30.0
-_CHANNEL_CMDS = {"scan", "pull_data", "push_data", "restart_dsh"}
+_CHANNEL_CMDS = {"scan", "pull_data", "push_data", "restart_dsh", "start_panel"}
 
 
 def _channel_state():
