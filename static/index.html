@@ -79,6 +79,8 @@
       <span id="poolBar"></span>
     </div>
     <div class="panel-grid" id="panels"></div>
+    <div class="sec-title">图像生成试炼场（像素尺寸预设 · 走 Hub 统一入口 /v1/images/generations）</div>
+    <div class="card" id="imgPlay"></div>
     <div class="sec-title">百炼免费额度明细（来自 bl usage free，分钟级口径以控制台为准）</div>
     <div class="card">
       <div id="quotaSummary" class="quota-line">尚未同步。在百炼渠道卡片的「配置与授权」里点「同步百炼额度」。</div>
@@ -104,8 +106,8 @@ function catOf(m){
   if(n.includes('rerank')) return '重排序';
   if(n.includes('tts')||n.includes('cosyvoice')||n.includes('sambert')) return '语音合成';
   if(n.includes('asr')||n.includes('paraformer')||n.includes('gummy')||n.includes('filetrans')) return '语音识别';
-  if(n.includes('t2v')||n.includes('i2v')||n.includes('r2v')||n.includes('video')||n.includes('happyhorse')) return '视频生成';
-  if(n.includes('t2i')||n.includes('i2i')||n.includes('image')||n.includes('wanx')||n.includes('flux')) return '图像生成';
+  if(n.includes('t2v')||n.includes('i2v')||n.includes('r2v')||n.includes('video')||n.includes('happyhorse')||n.includes('seedance')) return '视频生成';
+  if(n.includes('t2i')||n.includes('i2i')||n.includes('image')||n.includes('wanx')||n.includes('flux')||n.includes('seedream')) return '图像生成';
   if(n.includes('omni')||n.includes('vl')||n.includes('vision')) return '多模态';
   if(n.includes('audio')||n.includes('livetranslate')) return '音频';
   return '文本生成';
@@ -849,6 +851,136 @@ async function delKey(id){
   }catch(e){ toast('删除失败：'+e.message, true); }
 }
 
+// ---------------- R56 图像生成试炼场：像素尺寸预设 ----------------
+const IMG_PRESETS = [
+  {w:2048, h:2048, name:'方图 1:1',   use:'头像 · 贴图'},
+  {w:2560, h:1440, name:'横屏 16:9',  use:'桌面壁纸 · 封面'},
+  {w:1440, h:2560, name:'竖屏 9:16',  use:'手机壁纸 · 竖版'},
+  {w:2560, h:1920, name:'相机 4:3',   use:'文章配图'},
+  {w:1920, h:2560, name:'竖幅 3:4',   use:'海报'},
+  {w:3440, h:1440, name:'宽幅 21:9', use:'横幅 · 带鱼屏'}
+];
+
+function ipIco(w, h){
+  // 手绘风简笔画：按预设宽高比画一个微歪的矩形（Q 曲线抖动 + round 笔帽）
+  const fit = 23 / Math.max(w, h);
+  const iw = w * fit, ih = h * fit;
+  const x0 = (28 - iw) / 2, y0 = (28 - ih) / 2;
+  const x1 = x0 + iw, y1 = y0 + ih;
+  const mx = (x0 + x1) / 2, my = (y0 + y1) / 2;
+  const d = [
+    'M ' + (x0+1.4).toFixed(1) + ' ' + (y0-0.6).toFixed(1),
+    'Q ' + (mx+0.5).toFixed(1) + ' ' + (y0+0.9).toFixed(1) + ' ' + (x1-0.2).toFixed(1) + ' ' + (y0+0.5).toFixed(1),
+    'M ' + (x1+0.5).toFixed(1) + ' ' + (y0+1.6).toFixed(1),
+    'Q ' + (x1-0.9).toFixed(1) + ' ' + (my-0.4).toFixed(1) + ' ' + (x1-0.4).toFixed(1) + ' ' + (y1-0.7).toFixed(1),
+    'M ' + (x1-0.9).toFixed(1) + ' ' + (y1+0.7).toFixed(1),
+    'Q ' + (mx-0.6).toFixed(1) + ' ' + (y1-0.8).toFixed(1) + ' ' + (x0+0.3).toFixed(1) + ' ' + (y1-0.2).toFixed(1),
+    'M ' + (x0-0.7).toFixed(1) + ' ' + (y1-1.1).toFixed(1),
+    'Q ' + (x0+0.8).toFixed(1) + ' ' + (my+0.5).toFixed(1) + ' ' + (x0+0.6).toFixed(1) + ' ' + (y0+0.9).toFixed(1)
+  ].join(' ');
+  return '<svg width="28" height="28" viewBox="0 0 28 28" style="flex:none">'
+    + '<path d="' + d + '" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>';
+}
+
+function renderImgPlay(){
+  const el = $('#imgPlay');
+  if(!el) return;
+  if(window._ipBusy) return; // 生成中不重建，防止后台额度同步触发 load() 清掉进行中的请求
+  const opts = [];
+  (STATE.providers || []).forEach(p => {
+    (p.models || []).forEach(m => {
+      if(isEnabled(p, m) && catOf(m) === '图像生成') opts.push({v: p.name + '::' + m, t: p.name + ' · ' + m});
+    });
+  });
+  let keep = {prompt:'', sel:'', cw:'', ch:'', out:'', i:0};
+  if(el.dataset.inited === '1'){
+    keep = {prompt: ($('#ipPrompt')||{}).value || '', sel: ($('#ipModel')||{}).value || '',
+            cw: ($('#ipCW')||{}).value || '', ch: ($('#ipCH')||{}).value || '',
+            out: ($('#ipOut')||{}).innerHTML || '', i: window._ipSel|0};
+  }
+  const selHtml = opts.length
+    ? '<select id="ipModel">' + opts.map(o =>
+        '<option value="'+esc(o.v)+'"'+(keep.sel===o.v?' selected':'')+'>'+esc(o.t)+'</option>').join('') + '</select>'
+    : '<select id="ipModel" disabled><option value="">（没有已勾选的图像生成模型）</option></select>';
+  el.innerHTML =
+    '<div class="ip-row" style="margin-top:0">'
+    + '<span class="q-num">模型</span>' + selHtml
+    + '<span class="q-num" style="margin-left:10px">自定义</span>'
+    + '<input id="ipCW" placeholder="宽" inputmode="numeric" value="'+esc(keep.cw)+'" style="width:76px"> × '
+    + '<input id="ipCH" placeholder="高" inputmode="numeric" value="'+esc(keep.ch)+'" style="width:76px">'
+    + '<span class="q-num">（填写则覆盖预设；单边 ≤4096）</span>'
+    + '</div>'
+    + '<div style="margin-top:10px"><textarea id="ipPrompt" rows="2" placeholder="画面描述：要画什么、风格、光线、视角…">'+esc(keep.prompt)+'</textarea></div>'
+    + '<div class="q-num" style="margin-top:8px">常用像素尺寸（单选 · 预设均满足 doubao-seedream-5-0 最小像素 ≥369万，不触发自动升档）</div>'
+    + '<div class="ip-grid">'
+    + IMG_PRESETS.map(function(p, i){
+        return '<button type="button" class="ip-pre'+(i===keep.i?' on':'')+'" onclick="ipPick('+i+')">'
+          + '<span class="ip-ico">'+ipIco(p.w, p.h)+'</span>'
+          + '<span><span class="ip-name">'+p.name+' · '+p.w+'×'+p.h+'</span><br>'
+          + '<span class="ip-use">'+p.use+' · '+Math.round(p.w*p.h/10000)+'万像素</span></span>'
+          + '</button>';
+      }).join('')
+    + '</div>'
+    + '<div class="ip-row">'
+    + '<button type="button" id="ipBtn" onclick="ipGen()">✎ 生成图片</button>'
+    + '<span class="q-num">走 Hub 统一入口 · 消耗所选渠道额度 · seedream 小尺寸会自动升档</span>'
+    + '</div>'
+    + '<div id="ipOut" class="ip-out">'+keep.out+'</div>';
+  el.dataset.inited = '1';
+}
+
+function ipPick(i){
+  window._ipSel = i;
+  var bs = document.querySelectorAll('#imgPlay .ip-pre');
+  for(var j = 0; j < bs.length; j++) bs[j].classList.toggle('on', j === i);
+}
+
+async function ipGen(){
+  var out = $('#ipOut'), btn = $('#ipBtn');
+  var model = ($('#ipModel')||{}).value || '';
+  var prompt = (($('#ipPrompt')||{}).value || '').trim();
+  if(!model){ toast('没有可选的图像生成模型，请先在渠道里勾选', true); return; }
+  if(!prompt){ toast('请先填写画面描述', true); return; }
+  var cw = +(($('#ipCW')||{}).value || 0), ch = +(($('#ipCH')||{}).value || 0);
+  var size;
+  if(cw > 0 && ch > 0){
+    if(cw > 4096 || ch > 4096){ toast('单边不能超过 4096', true); return; }
+    size = cw + 'x' + ch;
+  }else{
+    var pr = IMG_PRESETS[window._ipSel|0] || IMG_PRESETS[0];
+    size = pr.w + 'x' + pr.h;
+  }
+  window._ipBusy = true;
+  btn.disabled = true; btn.textContent = '生成中…（最长约 1 分钟）';
+  out.innerHTML = '<span class="q-num">生成中…</span>';
+  try{
+    const r = await fetch('/v1/images/generations', {
+      method:'POST',
+      headers:{'Content-Type':'application/json', 'Authorization':'Bearer ' + (STATE.hub_key || '')},
+      body: JSON.stringify({model: model, prompt: prompt, size: size})
+    });
+    const bumped = r.headers.get('x-hub-size-bumped');
+    let j = null; try{ j = await r.json(); }catch(e){}
+    if(!r.ok){
+      const msg = (j && ((j.error && j.error.message) || j.detail || j.message)) || ('HTTP ' + r.status);
+      out.innerHTML = '<div class="ip-err">✗ ' + esc(msg) + '</div>';
+      return;
+    }
+    const it = ((j && j.data) || [])[0] || {};
+    const src = it.url || (it.b64_json ? 'data:image/png;base64,' + it.b64_json : '');
+    if(!src){ out.innerHTML = '<div class="ip-err">✗ 返回里没有图片数据</div>'; return; }
+    out.innerHTML =
+      (bumped ? '<div class="ip-bump">请求尺寸 ' + esc(size) + ' 小于该模型最小像素要求，Hub 已自动升档为 ' + esc(bumped) + '</div>' : '')
+      + '<img src="' + esc(src) + '" alt="生成结果">'
+      + '<div class="q-num" style="margin-top:6px">' + esc(model) + ' · 实际尺寸 ' + esc(bumped || size) + '</div>';
+  }catch(e){
+    out.innerHTML = '<div class="ip-err">✗ ' + esc(e.message || String(e)) + '</div>';
+  }finally{
+    window._ipBusy = false;
+    btn.disabled = false; btn.textContent = '✎ 生成图片';
+  }
+}
+
 // ---------------- 总览：统计磁贴行 ----------------
 function renderTiles(){
   const t = $('#tiles');
@@ -1075,6 +1207,7 @@ function render(){
     renderPanels();
     renderPoolBar();
     renderPoolPanel();
+    renderImgPlay();
   }
   // Hub 统一 key
   const hk = STATE.hub_key || '';
