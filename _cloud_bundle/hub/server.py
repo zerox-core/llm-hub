@@ -3420,6 +3420,10 @@ async def api_volc_quota_refresh(req: Request):
         base = _volc_foundation_name(m)
         item = activations.get(base)
         if item is None:
+            pref = [n for n in activations if n and base.startswith(n + "-")]
+            if pref:
+                item = activations[max(pref, key=len)]
+        if item is None:
             res2, err2 = _volc_api(ak, sk, "GetModelActivation",
                                    {"FoundationModelName": base, "WithFreeUsage": True})
             if err2:
