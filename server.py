@@ -1063,6 +1063,7 @@ app.add_middleware(
     allow_origins=["http://127.0.0.1:3080", "http://localhost:3080", "https://zxc66.asia", "https://hub.zeroxcore.tech"],
     allow_methods=["*"],
     allow_headers=["*"],
+    allow_private_network=True,
 )
 
 
