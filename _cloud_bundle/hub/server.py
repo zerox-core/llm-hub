@@ -517,9 +517,9 @@ def model_category(name: str) -> str:
         return "语音合成"
     if any(k in n for k in ("asr", "paraformer", "gummy", "filetrans")):
         return "语音识别"
-    if any(k in n for k in ("t2v", "i2v", "r2v", "video", "happyhorse")):
+    if any(k in n for k in ("t2v", "i2v", "r2v", "video", "happyhorse", "seedance")):
         return "视频生成"
-    if any(k in n for k in ("t2i", "i2i", "image", "wanx", "flux")):
+    if any(k in n for k in ("t2i", "i2i", "image", "wanx", "flux", "seedream")):
         return "图像生成"
     if any(k in n for k in ("omni", "vl", "vision")):
         return "多模态"
@@ -1503,7 +1503,8 @@ def _pool_view(d):
                     "models": pl.get("models") or [],
                     "providers": [p["id"] for p in provs],
                     "channel_pid": pl.get("channel_pid") or "",
-                    "channel_brand": pl.get("channel_brand") or ""})
+                    "channel_brand": pl.get("channel_brand") or "",
+                    "url": pl.get("url") or ""})
     known = {pl["id"] for pl in d.get("pools") or []}
     rest = [p for p in d["providers"] if p.get("pool_id") not in known]
     if rest:
@@ -2769,6 +2770,37 @@ async def _stream_gen_failover(p, m, resp, client, t0, body, rest,
 
 # ---------------- 图像生成转发（R54，2026-09-24） ----------------
 
+def _bump_image_size(r, body):
+    """doubao-seedream-5-0 等模型有最小像素硬约束（如 >=3686400px）。
+    上游 400 且报文含该约束时，把请求 size 等比整数倍放大到满足最小像素后重试一次；
+    8 倍仍不达标或任一边超 4096 则放弃（错误原样透传）。返回放大后的 size 字符串。"""
+    try:
+        txt = json.dumps(r.json(), ensure_ascii=False)
+    except Exception:
+        return None
+    m = re.search(r"image size must be at least (\d+) pixels", txt)
+    if not m:
+        return None
+    need = int(m.group(1))
+    cur = body.get("size")
+    if not isinstance(cur, str):
+        return None
+    m2 = re.fullmatch(r"(\d+)x(\d+)", cur.strip())
+    if not m2:
+        return None
+    w, h = int(m2.group(1)), int(m2.group(2))
+    if w <= 0 or h <= 0:
+        return None
+    sc = 1
+    while sc < 8 and w * sc * h * sc < need:
+        sc += 1
+    nw, nh = w * sc, h * sc
+    if nw * nh < need or nw > 4096 or nh > 4096:
+        return None
+    body["size"] = "%dx%d" % (nw, nh)
+    return body["size"]
+
+
 @app.post("/v1/images/generations")
 async def hub_images(req: Request):
     """OpenAI 兼容出图入口（与 /v1/chat/completions 同套 hub_key 鉴权与号池隔离）。
@@ -2834,17 +2866,26 @@ async def hub_images(req: Request):
     headers = {"Authorization": "Bearer " + p["api_key"], "Content-Type": "application/json"}
     url = p["base_url"].rstrip("/") + "/images/generations"
     t0 = time.time()
+    size_bumped = None
     try:
         async with _async_client(httpx.Timeout(300.0, connect=20.0),
                                  bool(p.get("use_egress"))) as cli:
             r = await cli.post(url, json=b, headers=headers)
+            if r.status_code == 400:
+                _nb = _bump_image_size(r, b)
+                if _nb:
+                    r = await cli.post(url, json=b, headers=headers)
+                    size_bumped = _nb
         ms = int((time.time() - t0) * 1000)
         log_call({"source": "proxy", "provider": p.get("name"),
                   "model_requested": model_requested, "model_used": model,
                   "ok": r.status_code == 200, "status": r.status_code,
                   "latency_ms": ms,
+                  "size_bumped": size_bumped,
                   "error": None if r.status_code == 200 else "images HTTP %d" % r.status_code})
         hdrs = {"X-Hub-Model": model, "X-Hub-Provider": p.get("id") or ""}
+        if size_bumped:
+            hdrs["X-Hub-Size-Bumped"] = size_bumped
         try:
             return JSONResponse(status_code=r.status_code, content=r.json(), headers=hdrs)
         except Exception:

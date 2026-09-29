@@ -168,6 +168,9 @@ function enabledCount(p){
 function isAgProvider(p){ return p && p.type === 'openai' && (p.base_url||'').includes(':8317') && p.kind !== 'wb'; }
 function isWbProvider(p){ return p && p.kind === 'wb'; }
 function isCopilotProvider(p){ return p && p.type === 'openai' && (p.base_url||'').includes(':4141'); }
+function isSnProvider(p){ return p && (p.id === '975abae5fa' || (p.base_url||'').includes('sensenova')); }
+function snRate(m){ const sq = STATE.sn_quota || {}; return (sq.rates||{})[m] || null; }
+function isVolcProvider(p){ return p && (p.base_url||'').includes('volces.com'); }
 function agModelGroup(m){ return (m||'').toLowerCase().startsWith('gemini') ? 'gemini' : 'third'; }
 function agGroupTitle(key){ return key === 'gemini' ? 'Gemini 组' : 'Claude/GPT 组'; }
 
@@ -248,6 +251,32 @@ function quotaCell(m, isBailian, p){
       '<span class="quota-bar"><i class="'+cls+'" style="width:'+pct.toFixed(1)+'%"></i></span>' +
       '<span class="q-num">组余 '+(Math.round(worst*1000)/10)+'%</span>';
   }
+  if(p && isSnProvider(p)){
+    const r = snRate(m);
+    if(!r) return '<span class="chip">倍率未收录</span>';
+    if(r[2] === 'unusable') return '<span class="chip bad">API 404 不可用</span>';
+    const stChip = r[2] === 'confirmed' ? '<span class="chip ok">倍率已确认</span>'
+      : (r[2] === 'single' ? '<span class="chip warn">倍率待确认</span>' : '<span class="chip">倍率未实测</span>');
+    if(!(r[0] || r[1])) return stChip;
+    return stChip + ' <span class="q-num">入 ' + r[0] + ' / 出 ' + r[1] + ' 积分/1K</span>';
+  }
+  if(p && isVolcProvider(p)){
+    const vq = STATE.volc_quota || {};
+    if(!vq.configured) return '<span class="chip">需配 AK</span> <span class="q-num">免费额度查询需火山账号 AccessKey</span>';
+    if(!vq.synced_at) return '<span class="q-num">额度未同步</span>';
+    const mi = (vq.models||{})[m];
+    if(!mi) return '<span class="q-num">—</span>';
+    if(mi.error) return '<span class="chip bad" title="'+esc(mi.error)+'">查询失败</span>';
+    if(mi.paid) return '<span class="chip warn">付费</span> <span class="q-num">无免费额度</span>';
+    if(mi.state && mi.state !== 'Available') return '<span class="chip">未开通</span> <span class="q-num">'+esc(mi.state)+'</span>';
+    const tot = Number(mi.total||0);
+    if(!tot) return '<span class="q-num">无免费额度记录</span>';
+    const remv = Math.max(0, tot - Number(mi.consumed||0));
+    const pct = Math.max(0, Math.min(100, remv / tot * 100));
+    const cls = pct < 10 ? 'bad' : (pct < 30 ? 'warn' : '');
+    return '<span class="quota-bar"><i class="'+cls+'" style="width:'+pct.toFixed(1)+'%"></i></span>' +
+      '<span class="q-num">剩 '+fmtNum(remv)+' / '+fmtNum(tot)+'</span>';
+  }
   if(!isBailian) return '<span class="q-num">—</span>';
   const q = (STATE.quota && STATE.quota.entries) ? STATE.quota.entries[m] : null;
   if(!q) return '<span class="q-num" style="color:var(--bad)">无免费额度</span>';
@@ -294,6 +323,13 @@ function snapshotOpenCats(){
   return open;
 }
 let _openCats = new Set();
+// 渲染前后保持「配置与授权」展开状态（后台重渲染不再把用户刚展开的授权面板收起来）
+function snapshotOpenAuth(){
+  const open = new Set();
+  document.querySelectorAll('details.authbox[open]').forEach(d => open.add(d.id));
+  return open;
+}
+let _openAuths = new Set();
 
 function renderAgQuota(p){
   const aq = STATE.ag_quota || {};
@@ -364,6 +400,125 @@ function renderWbQuota(p){
     inner + syncLine + '</div>';
 }
 
+
+// ---- 商汤 SenseNova 积分（公测双池：本地估算 + 人工校准） ----
+function renderSnQuota(p){
+  const sq = STATE.sn_quota || {};
+  const pools = sq.pools || {};
+  const rates = sq.rates || {};
+  const cal = sq.calibration || {};
+  let inner = '';
+  if(!sq.configured)
+    inner += '<div class="quota-line" style="color:var(--warn)">商汤控制台额度接口需要网页登录态、无法自动同步。请打开控制台 Token 计划页，把两个池的「已用」积分填到下方校准一次；之后 Hub 会按倍率对每次中转调用本地扣减。</div>';
+  const bar3 = (used, cap) => {
+    const rem = Math.max(0, (cap||0) - (used||0));
+    const pct = cap > 0 ? Math.max(0, Math.min(100, rem / cap * 100)) : null;
+    const cls = pct === null ? '' : (pct < 10 ? 'bad' : (pct < 30 ? 'warn' : ''));
+    const bar = pct === null ? '' : '<span class="quota-bar"><i class="'+cls+'" style="width:'+pct.toFixed(1)+'%"></i></span>';
+    return {rem, bar};
+  };
+  const poolLine = (label, pk) => {
+    const a = bar3(pk.used_5h, pk.cap_5h), b = bar3(pk.used_week, pk.cap_week);
+    return '<div class="quota-line"><b>'+label+'</b><span class="q-num">60,000 积分/5小时 + 600,000 积分/周</span></div>' +
+      '<div class="quota-line"><span class="ag-wname">5 小时窗口</span>'+a.bar+'<span class="q-num">余 '+fmtNum(a.rem)+' / '+fmtNum(pk.cap_5h||0)+' · 已用 '+fmtNum(pk.used_5h||0)+(pk.reset_5h?' · '+esc(pk.reset_5h)+' 重置':'')+'</span></div>' +
+      '<div class="quota-line"><span class="ag-wname">每周窗口</span>'+b.bar+'<span class="q-num">余 '+fmtNum(b.rem)+' / '+fmtNum(pk.cap_week||0)+' · 已用 '+fmtNum(pk.used_week||0)+(pk.reset_week?' · '+esc(pk.reset_week)+' 重置':'')+'</span></div>';
+  };
+  inner += poolLine('通用积分池（全部免费模型）', pools.general || {});
+  inner += poolLine('Flash-Lite 专属池（溢出自动转扣通用池）', pools.flash_lite || {});
+  let rrows = '<div class="quota-line"><b>模型倍率</b><span class="q-num">积分 = tokens/1000 × 倍率；推理 tokens 按输出计</span></div>';
+  (p.models||[]).forEach(m => {
+    const r = rates[m];
+    let chip, rtxt = '';
+    if(!r) chip = '<span class="chip">未收录</span>';
+    else if(r[2]==='confirmed'){ chip = '<span class="chip ok">已实测确认</span>'; rtxt = '入 '+r[0]+' / 出 '+r[1]+' 积分/1K'; }
+    else if(r[2]==='single'){ chip = '<span class="chip warn">单方程待确认</span>'; rtxt = '入 '+r[0]+' / 出 '+r[1]+'（候选）积分/1K'; }
+    else if(r[2]==='unusable') chip = '<span class="chip bad">API 404 不可用</span>';
+    else chip = '<span class="chip">未实测</span>';
+    const ubm = (sq.used_by_model||{})[m];
+    rrows += '<div class="quota-line"><span class="ag-wname">'+esc(m)+'</span>'+chip+'<span class="q-num">'+rtxt+(ubm?(rtxt?' · ':'')+'校准后已用 '+fmtNum(ubm)+' 积分':'')+'</span></div>';
+  });
+  const calForm = '<div class="quota-line"><span class="q-num">'+(cal.ts ? '校准于 '+esc(String(cal.ts).slice(5,16)) : '从未校准')+' · 活动固定积分 '+fmtNum(sq.activity||0)+'（返赠 1:1 累计，不参与扣减）</span></div>' +
+    '<div class="quota-line"><span class="ag-wname">通用池已用</span><input id="sn-g5" placeholder="5h 已用" style="width:90px"> <input id="sn-gw" placeholder="每周已用" style="width:90px"></div>' +
+    '<div class="quota-line"><span class="ag-wname">专属池已用</span><input id="sn-f5" placeholder="5h 已用" style="width:90px"> <input id="sn-fw" placeholder="每周已用" style="width:90px"></div>' +
+    '<div class="quota-line"><span class="ag-wname">重置时间</span><input id="sn-r5" placeholder="5h 如 9月29日 03:05" style="width:150px"> <input id="sn-rw" placeholder="每周 如 10月5日 22:05" style="width:150px"> <input id="sn-act" placeholder="活动积分" style="width:70px"> <button class="small" onclick="submitSnCalibrate()">保存校准</button></div>' +
+    '<div class="quota-line"><span class="q-num">填控制台显示的「已用」值（不是剩余）；保存后 Hub 按倍率自动扣减，随时可再校准纠偏</span></div>';
+  return '<div class="ag-quota"><div class="quota-line"><b>商汤 SenseNova 积分</b>' +
+    '<span class="q-num">公测 Token 计划：通用池 + Flash-Lite 专属池；按模型倍率 × tokens 扣积分，本地估算 + 人工校准</span></div>' +
+    inner + rrows + calForm + '</div>';
+}
+
+async function submitSnCalibrate(){
+  const v = id => { const el = document.getElementById(id); return el ? el.value.trim() : ''; };
+  try{
+    const r = await api('/api/sn/quota/calibrate', 'POST', {
+      general_5h: v('sn-g5'), general_week: v('sn-gw'),
+      flash_5h: v('sn-f5'), flash_week: v('sn-fw'),
+      win5h_reset: v('sn-r5'), week_reset: v('sn-rw'), activity: v('sn-act')});
+    if(r.ok) toast('已保存 SenseNova 校准');
+    else toast('保存失败', true);
+  }catch(e){ toast('保存失败：' + e.message, true); }
+  await load();
+}
+
+function renderVolcQuota(p){
+  const vq = STATE.volc_quota || {};
+  let rows = '';
+  (p.models||[]).forEach(m => {
+    const mi = (vq.models||{})[m];
+    let cell;
+    if(!vq.configured) cell = '<span class="chip">未配置</span> <span class="q-num">填下方 AccessKey 后保存</span>';
+    else if(!vq.synced_at) cell = '<span class="chip">未同步</span>';
+    else if(!mi) cell = '<span class="q-num">无记录</span>';
+    else if(mi.error) cell = '<span class="chip bad" title="'+esc(mi.error)+'">查询失败</span>';
+    else if(mi.paid) cell = '<span class="chip warn">付费</span> <span class="q-num">无免费额度</span>';
+    else if(mi.state && mi.state !== 'Available') cell = '<span class="chip">未开通</span> <span class="q-num">'+esc(mi.state)+'</span>';
+    else if(!Number(mi.total||0)) cell = '<span class="q-num">无免费额度记录</span>';
+    else {
+      const t = Number(mi.total), r2 = Math.max(0, t - Number(mi.consumed||0));
+      const pct2 = Math.max(0, Math.min(100, r2 / t * 100));
+      const cls2 = pct2 < 10 ? 'bad' : (pct2 < 30 ? 'warn' : '');
+      cell = '<span class="quota-bar"><i class="'+cls2+'" style="width:'+pct2.toFixed(1)+'%"></i></span>' +
+        '<span class="q-num">剩 '+fmtNum(r2)+' / '+fmtNum(t)+(mi.foundation && mi.foundation !== m ? ' · 基础模型 '+esc(mi.foundation) : '')+'</span>';
+    }
+    rows += '<div class="quota-line"><span class="ag-wname">'+esc(m)+'</span>'+cell+'</div>';
+  });
+  const cfgForm = '<div class="quota-line"><span class="ag-wname">AccessKey</span>' +
+    '<input id="volc-ak" placeholder="Access Key ID" style="width:190px"> ' +
+    '<input id="volc-sk" type="password" placeholder="Secret Access Key" style="width:230px"> ' +
+    '<button class="small" onclick="saveVolcKeys(this)">保存并验证</button></div>' +
+    '<div class="quota-line"><span class="q-num">免费额度只能用火山账号 AccessKey 查（GetModelActivation 只读接口，推理 API Key 查不了）。' +
+    'AK/SK 保存在服务器端 data.json，仅用于签名只读查询。获取：火山引擎控制台 → 右上角头像 → API Access Key 管理。</span></div>';
+  return '<div class="ag-quota"><div class="quota-line"><b>火山方舟免费额度</b>' +
+    '<span class="q-num">各基础模型开通时赠送的初始免费推理额度，按模型独立核算</span></div>' +
+    rows +
+    '<div class="quota-line"><span class="q-num">'+(vq.synced_at ? '同步于 '+esc(String(vq.synced_at).slice(5,16)) : '尚未同步')+
+    (vq.access_key_masked ? ' · AK '+esc(vq.access_key_masked) : '')+'</span>' +
+    '<button class="small" onclick="syncVolcQuota()">同步免费额度</button></div>' + cfgForm + '</div>';
+}
+
+async function saveVolcKeys(btn){
+  const akEl = document.getElementById('volc-ak'), skEl = document.getElementById('volc-sk');
+  const ak = akEl ? akEl.value.trim() : '', sk = skEl ? skEl.value.trim() : '';
+  if(!ak || !sk){ toast('请填写 Access Key ID 和 Secret Access Key', true); return; }
+  btn.disabled = true; btn.textContent = '验证中…';
+  try{
+    const r = await api('/api/volc/keys', 'POST', {access_key: ak, secret_key: sk});
+    if(r.ok){ toast('AccessKey 验证通过（已开通基础模型 '+r.activated+' 个），已保存'); await load(); }
+    else toast('验证失败：'+(r.error||''), true);
+  }catch(e){ toast('保存失败：'+e.message, true); }
+  btn.disabled = false; btn.textContent = '保存并验证';
+}
+
+async function syncVolcQuota(){
+  toast('正在同步火山免费额度…');
+  try{
+    const r = await api('/api/volc/quota/refresh', 'POST', {});
+    if(r.ok) toast('已同步火山免费额度（'+(r.synced||0)+' / '+(r.total||0)+' 模型）');
+    else toast('同步失败：'+(r.error||''), true);
+  }catch(e){ toast('同步失败：' + e.message, true); }
+  await load();
+}
+
 function poolSwitchSel(p){
   const pools = STATE.pools || [];
   if(pools.length <= 1) return '';
@@ -414,13 +569,15 @@ function renderProvider(p, forceOpen){
   const isAg = isAgProvider(p);
   const isWb = isWbProvider(p);
   const isCopilot = isCopilotProvider(p);
+  const isSn = isSnProvider(p);
+  const isVolc = isVolcProvider(p);
   const wbst = STATE.wb_status || {};
   const activeNoFree = isBailian && p.active_model && !p.allow_paid && qState(p.active_model) !== 'free_ok';
   const activeWarn = activeNoFree ? ' <span class="chip bad">无免费额度</span>' : '';
   const paidChip = p.allow_paid ? ' <span class="chip warn">允许付费</span>' : '';
   const wbChip = isWb ? ' <span class="chip '+(wbst.logged_in?'ok':'bad')+'">'+(wbst.logged_in?'已登录':'未登录')+'</span>' : '';
   let head = '<div class="p-head"><span class="p-name">'+esc(p.name)+'</span>' +
-    '<span class="chip">'+(isWb?'腾讯 CodeBuddy 反代':(isCopilot?'GitHub Copilot 反代':(isBailian?'阿里云百炼':'OpenAI 兼容')))+'</span>' + wbChip + paidChip +
+    '<span class="chip">'+(isSn?'商汤 SenseNova':(isVolc?'火山方舟':(isWb?'腾讯 CodeBuddy 反代':(isCopilot?'GitHub Copilot 反代':(isBailian?'阿里云百炼':'OpenAI 兼容')))))+'</span>' + wbChip + paidChip +
     '<span class="chip blue">已勾选 '+enabledCount(p)+' / '+(p.models||[]).length+'</span>' +
     '<span class="p-active">当前模型：<b>'+esc(p.active_model||'未选择')+'</b>'+activeWarn+'</span>' +
     '<span class="grow"></span>' + poolSwitchSel(p) +
@@ -502,6 +659,7 @@ function renderProvider(p, forceOpen){
       (isAg ? '<button class="small" title="同步反重力 5 小时 / 每周额度（不消耗对话额度）" onclick="syncAgQuota()">同步额度</button>' : '') +
       (isWb ? '<button class="small" title="同步 CodeBuddy 积分与每模型使用倍率（不消耗积分）" onclick="syncWbQuota()">同步积分</button>' : '') +
       (isCopilot ? '<button class="small" title="同步 Copilot premium 月配额（只读 check-usage，不耗配额）" onclick="syncCopilotQuota()">同步配额</button>' : '') +
+      (isVolc ? '<button class="small" title="从火山官方 GetModelActivation 只读同步各基础模型免费推理额度" onclick="syncVolcQuota()">同步免费额度</button>' : '') +
       '<button class="small" title="勾选本渠道全部模型（进入可调列表）" onclick="bulkEnable(\''+p.id+'\', true)">全选模型</button>' +
       '<button class="small" title="取消勾选本渠道全部模型（退出可调列表与轮询）" onclick="bulkEnable(\''+p.id+'\', false)">全不选</button>' +
       '<button class="small" onclick="testModel(\''+p.id+'\',\''+esc(p.active_model||'')+'\')">测试当前模型</button>' +
@@ -511,7 +669,7 @@ function renderProvider(p, forceOpen){
       '<button class="small danger" onclick="delProvider(\''+p.id+'\',\''+esc(p.name)+'\')">删除渠道</button>' +
       paidBox + freeOnlyBox + hiddenHint +
     '</div>' +
-    (isAg ? renderAgQuota(p) : (isWb ? renderWbQuota(p) : (isCopilot ? renderCopilotQuota(p) : ''))) +
+    (isAg ? renderAgQuota(p) : (isWb ? renderWbQuota(p) : (isCopilot ? renderCopilotQuota(p) : (isSn ? renderSnQuota(p) : (isVolc ? renderVolcQuota(p) : ''))))) +
     (viewModels.length ? '<div class="order-hint">勾选 = 模型进入可调列表（auto 轮询与 Harness 单选都只用已勾选模型）；轮询按下列顺序进行（↑↓ 调整）。</div>' : '') +
     fetchErr +
     (viewModels.length ? catHtml :
@@ -558,6 +716,8 @@ function effUrl(base){
 
 // ---------------- 渠道种类识别 ----------------
 function provIcon(p){
+  if(isSnProvider(p)) return '✺';
+  if(isVolcProvider(p)) return '▲';
   if(isCopilotProvider(p)) return '⬡';
   if(isWbProvider(p)) return '◈';
   if(isAgProvider(p)) return '✦';
@@ -565,6 +725,8 @@ function provIcon(p){
   return '◇';
 }
 function provKindName(p){
+  if(isSnProvider(p)) return '商汤 SenseNova';
+  if(isVolcProvider(p)) return '火山方舟';
   if(isCopilotProvider(p)) return 'GitHub Copilot 反代';
   if(isWbProvider(p)) return '腾讯 CodeBuddy 反代';
   if(isAgProvider(p)) return '反重力反代';
@@ -593,6 +755,25 @@ function provQuotaLine(p){
       const g1 = agGroupInfo('gemini'), g2 = agGroupInfo('claude');
       const one = g => g.state==='ok' ? '余 '+fmtNum(g.rem5!==null?g.rem5:g.remw) : (g.state==='cooldown'?'冷却中':(g.state==='empty'?'已用尽':'未同步'));
       return '<span class="chip">AG gemini '+one(g1)+' · claude '+one(g2)+'</span>';
+    }
+    if(isSnProvider(p)){
+      const sq = STATE.sn_quota || {};
+      if(!sq.configured) return '<span class="chip">商汤积分待校准</span>';
+      const g = (sq.pools||{}).general || {};
+      return '<span class="chip">通用池 5h 余 '+fmtNum(Math.max(0,(g.cap_5h||0)-(g.used_5h||0)))+' / '+fmtNum(g.cap_5h||0)+' 积分</span>';
+    }
+    if(isVolcProvider(p)){
+      const vq = STATE.volc_quota || {};
+      if(!vq.configured) return '<span class="chip">火山免费额度待配置</span>';
+      if(!vq.synced_at) return '<span class="chip">火山额度未同步</span>';
+      let rem2 = 0, tot2 = 0, nfree2 = 0, errc = 0;
+      Object.values(vq.models||{}).forEach(mi => {
+        if(mi.error){ errc++; return; }
+        const t = Number(mi.total||0);
+        if(t){ tot2 += t; rem2 += Math.max(0, t - Number(mi.consumed||0)); nfree2++; }
+      });
+      if(errc && !nfree2) return '<span class="chip bad">火山额度查询失败 ×'+errc+'</span>';
+      return '<span class="chip">'+nfree2+' 模型 · 免费额度剩 '+fmtNum(rem2)+' / '+fmtNum(tot2)+'</span>';
     }
     if(p.type === 'bailian'){
       const q = STATE.quota || {};
@@ -710,7 +891,7 @@ function authBoxHtml(p, withKey){
       '<div class="quota-line"><span class="ag-wname" style="min-width:36px">Key</span>' +
       '<code>'+esc(maskKey(p.api_key))+'</code><button class="small" onclick="cp(\''+esc(p.api_key)+'\')">复制</button></div>';
   }
-  return '<details class="authbox"><summary>配置与授权</summary>' +
+  return '<details class="authbox" id="auth-'+p.id+'"'+(_openAuths.has('auth-'+p.id)?' open':'')+'><summary>配置与授权</summary>' +
     '<div class="auth-in">'+status+btns+'</div>' + keyRows + '</details>';
 }
 
@@ -786,12 +967,15 @@ function renderPoolPanel(){
     h += '<div class="pp-pool">';
     h += '<div class="pp-row"><span class="pp-name">◆ '+esc(pl.name)+'</span>'
        + '<span class="chip">'+(isMp ? '模型池 · '+(pl.models||[]).length+' 模型' : '渠道池 · '+provs.length+' 账号')+'</span>'
+       + (pl.url ? '<span class="chip">原渠道直连</span>' : '')
        + '<code class="pp-key">'+esc(maskKey(pl.key))+'</code>'
        + '<button class="small" onclick="cp(\''+esc(pl.key||'')+'\')">复制</button>'
-       + '<button class="small" onclick="resetPoolKey(\''+pl.id+'\')">重置key</button></div>';
+       + '<button class="small" onclick="resetPoolKey(\''+pl.id+'\')">重置key</button>'
+       + (pl.url ? '<span class="pp-name">URL</span><code>'+esc(pl.url)+'</code><button class="small" onclick="cp(\''+esc(pl.url)+'\')">复制</button>' : '')
+       + '</div>';
     if(isMp){
       const names = (pl.models||[]).map(s => esc(String(s).split('::').pop())).join('、');
-      h += '<div class="pp-sub">模型：'+names+'</div>';
+      h += '<div class="pp-sub">模型：'+names+(pl.url ? ' · <b>原渠道直连池</b>：URL+key 直接调用百炼原生接口（视频/语音站内不中转，勿点重置key）' : '')+'</div>';
     }else{
       h += '<div class="pp-sub">渠道：'+(provs.map(p=>esc(p.name)).join('、')||'（空）')+' · auto 在池内轮询</div>';
     }
@@ -1245,7 +1429,16 @@ async function pollWbAuth(){
 }
 
 async function load(){
+  // R52 防闪烁/点击失效：
+  // ①单飞：同一时刻只跑一次 load，重入只记一次补跑（防止并发全量重渲染叠加）
+  // ②R50 节流：后台同步成功后只在真拿到 ok/synced_at 时才重渲染；本页 10 分钟内同一类后台同步只试一次。
+  //   旧版同步成功后无条件 load()，云端 synced_at 不更新时形成 load→refresh→load 无限循环，
+  //   全量 innerHTML 重渲染持续闪烁，点击目标被 DOM 重建吞掉。
+  if(window._loadBusy){ window._loadPending = true; return; }
+  window._loadBusy = true;
+  try{
   _openCats = snapshotOpenCats();
+  _openAuths = snapshotOpenAuth();
   STATE = await api('/api/state');
   if(STATE.cloud_mode){ document.querySelectorAll('.only-local').forEach(el=>{ el.style.display='none'; }); }
   render();
@@ -1256,10 +1449,11 @@ async function load(){
       const st = (STATE.ag_quota||{}).synced_at || '';
       const tSrv = Date.parse((STATE.server_time||'').replace(' ','T'));
       const tSyn = st ? Date.parse(st.replace(' ','T')) : 0;
-      if(!st || (tSrv - tSyn) > 600000){
+      if((!st || (tSrv - tSyn) > 600000) && (!window._agBgTry || (Date.now()-window._agBgTry) > 600000)){
+        window._agBgTry = Date.now();
         window._agSyncing = true;
         api('/api/ag/quota/refresh', 'POST', {})
-          .then(()=>{ window._agSyncing = false; load(); })
+          .then(r=>{ window._agSyncing = false; if(r && (r.ok || r.synced_at)) load(); })
           .catch(()=>{ window._agSyncing = false; });
       }
     }
@@ -1271,10 +1465,11 @@ async function load(){
       const st2 = (STATE.wb_quota||{}).synced_at || '';
       const tSrv2 = Date.parse((STATE.server_time||'').replace(' ','T'));
       const tSyn2 = st2 ? Date.parse(st2.replace(' ','T')) : 0;
-      if(!st2 || (tSrv2 - tSyn2) > 600000){
+      if((!st2 || (tSrv2 - tSyn2) > 600000) && (!window._wbBgTry || (Date.now()-window._wbBgTry) > 600000)){
+        window._wbBgTry = Date.now();
         window._wbSyncing = true;
         api('/api/wb/quota/refresh', 'POST', {})
-          .then(()=>{ window._wbSyncing = false; load(); })
+          .then(r=>{ window._wbSyncing = false; if(r && (r.ok || r.synced_at)) load(); })
           .catch(()=>{ window._wbSyncing = false; });
       }
     }
@@ -1286,14 +1481,35 @@ async function load(){
       const st3 = (STATE.copilot_quota||{}).synced_at || '';
       const tSrv3 = Date.parse((STATE.server_time||'').replace(' ','T'));
       const tSyn3 = st3 ? Date.parse(st3.replace(' ','T')) : 0;
-      if(!st3 || (tSrv3 - tSyn3) > 600000){
+      if((!st3 || (tSrv3 - tSyn3) > 600000) && (!window._cpBgTry || (Date.now()-window._cpBgTry) > 600000)){
+        window._cpBgTry = Date.now();
         window._cpSyncing = true;
         api('/api/copilot/quota/refresh', 'POST', {})
-          .then(()=>{ window._cpSyncing = false; load(); })
+          .then(r=>{ window._cpSyncing = false; if(r && (r.ok || r.synced_at)) load(); })
           .catch(()=>{ window._cpSyncing = false; });
       }
     }
   }catch(e){}
+  // 火山方舟免费额度：已配置 AK 且超过 10 分钟未同步 → 后台只读同步一次（GetModelActivation，不计费）
+  try{
+    const hasVolc = (STATE.providers||[]).some(isVolcProvider);
+    if(hasVolc && (STATE.volc_quota||{}).configured && !window._volcSyncing){
+      const st4 = (STATE.volc_quota||{}).synced_at || '';
+      const tSrv4 = Date.parse((STATE.server_time||'').replace(' ','T'));
+      const tSyn4 = st4 ? Date.parse(st4.replace(' ','T')) : 0;
+      if((!st4 || (tSrv4 - tSyn4) > 600000) && (!window._volcBgTry || (Date.now()-window._volcBgTry) > 600000)){
+        window._volcBgTry = Date.now();
+        window._volcSyncing = true;
+        api('/api/volc/quota/refresh', 'POST', {})
+          .then(r=>{ window._volcSyncing = false; if(r && (r.ok || r.synced_at)) load(); })
+          .catch(()=>{ window._volcSyncing = false; });
+      }
+    }
+  }catch(e){}
+  } finally {
+    window._loadBusy = false;
+    if(window._loadPending){ window._loadPending = false; load(); }
+  }
 }
 
 async function syncWbQuota(){
