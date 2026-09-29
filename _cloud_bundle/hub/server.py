@@ -8,6 +8,7 @@ v3 新增：
 - 统一轮询代理入口 POST /v1/chat/completions（model=auto 时按排序轮询免费额度模型）
 - bl usage freetier 试用完即停开关
 """
+import contextvars
 import datetime
 import glob
 import json
@@ -29,7 +30,7 @@ import httpx
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -53,11 +54,32 @@ _lock = threading.Lock()
 
 # ---------------- 调用日志（JSONL 追加，约 2MB 滚动截断） ----------------
 
+# R51：每次请求的 key/号池归属，由代理入口在鉴权后写入，log_call 自动并入日志条目。
+# 用 contextvars：async 处理器内每个请求任务各自独立，不串请求。
+_log_ctx = contextvars.ContextVar("hub_log_ctx", default=None)
+
+
+def _set_log_ctx(hk, scope):
+    """代理入口鉴权后调用：给本次请求的全部 log_call 打上 key/号池归属。
+    hk = 命中的 hub_keys 条目（主 key 直连时为 None）；scope = 号池 key 直授权时命中的号池。"""
+    if hk is not None:
+        _log_ctx.set({"key_name": hk.get("name") or _key_id_of(hk),
+                      "pool_id": hk.get("pool_id") or ""})
+    elif scope is not None:
+        _log_ctx.set({"key_name": "号池 key", "pool_id": scope.get("id") or ""})
+    else:
+        _log_ctx.set({"key_name": "主 key", "pool_id": ""})
+
+
 def log_call(entry):
     """落一条调用日志。字段：source(proxy/test), provider, model_requested, model_used,
     ok, status, latency_ms, prompt_tokens, completion_tokens, total_tokens,
-    stream, rotated, blocked, error"""
+    stream, rotated, blocked, error；另有 key_name / pool_id（代理调用自动并入）"""
     entry = dict(entry)
+    ctx = _log_ctx.get()
+    if ctx:
+        for _k, _v in ctx.items():
+            entry.setdefault(_k, _v)
     entry["ts"] = time.strftime("%Y-%m-%d %H:%M:%S")
     try:
         with open(LOG_FILE, "a", encoding="utf-8") as f:
@@ -71,10 +93,29 @@ def log_call(entry):
 
 # ---------------- 用户级 key 配额（R28 2026-09-24） ----------------
 # hub_keys 条目可带 pool_id（绑定号池 = 该 key 仅此池范围）与 quota
-# （rpm / daily_tokens / max_tokens）。计数器为进程内存级：hub 重启后当日
-# token 计数清零（v1 取舍；rpm 基本不受影响），需要精确账本时以 log_call 为准。
+# （rpm / daily_tokens / max_tokens）。计数器落盘 key_usage.json（与 data.json
+# 同目录，云端可经 HUB_KEY_USAGE_FILE 指到挂载卷）：hub 重启后当日 token 计数
+# 不清零；rpm 分钟窗随重启保留。精确账本仍以 log_call 为准。
 
 _key_usage = {}
+KEY_USAGE_FILE = Path(os.environ.get("HUB_KEY_USAGE_FILE") or (DATA_FILE.parent / "key_usage.json"))
+try:
+    _ku = json.loads(KEY_USAGE_FILE.read_text(encoding="utf-8") or "{}")
+    if isinstance(_ku, dict):
+        _key_usage.update(_ku)
+except Exception:
+    pass
+
+
+def _save_key_usage():
+    """原子写盘（tmp + os.replace），失败不影响主流程。"""
+    try:
+        tmp = str(KEY_USAGE_FILE) + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(_key_usage, f)
+        os.replace(tmp, KEY_USAGE_FILE)
+    except Exception:
+        pass
 
 
 def _key_id_of(hk):
@@ -106,6 +147,7 @@ def _key_quota_check(hk, body):
             return 429, {"message": "该 key 的当日 token 额度（%d）已用完，次日自动恢复。" % daily,
                          "type": "hub_key_daily_tokens_exhausted"}
         e["count"] = int(e.get("count") or 0) + 1
+        _save_key_usage()
     cap = int(q.get("max_tokens") or 0)
     if cap:
         cur = body.get("max_tokens")
@@ -129,6 +171,7 @@ def _key_quota_record(hk, total_tokens):
         e = _key_usage.get(_key_id_of(hk))
         if e is not None:
             e["tokens"] = int(e.get("tokens") or 0) + t
+            _save_key_usage()
 
 
 def _key_usage_view(hk):
@@ -228,6 +271,164 @@ def _ensure_pool_keys(d):
     return changed
 
 
+# ---------------- SenseNova 积分额度（公测双池：本地估算 + 人工校准） ----------------
+
+SN_PROVIDER_ID = "975abae5fa"
+SN_FLASH_LITE_MODELS = {"sensenova-6.8-flash-lite"}
+SN_CAP_5H = 60000.0
+SN_CAP_WEEK = 600000.0
+
+SN_RATES_DEFAULT = {
+    "glm-5.2": [32, 112, "confirmed"],
+    "deepseek-v4-flash": [4, 8, "confirmed"],
+    "sensenova-6.8-flash-lite": [2, 2, "confirmed"],
+    "deepseek-v4-pro": [4, 45, "single"],
+    "sensenova-u1-fast": [0, 0, "unusable"],
+    "sensenova-u1.5-lite": [0, 0, "unusable"],
+    "kimi-k3": [0, 0, "missing"],
+    "deepseek-flash": [0, 0, "missing"],
+    "deepseek-v4.1-flash": [0, 0, "missing"],
+}
+
+
+def _default_sn_quota():
+    return {"rates": {k: list(v) for k, v in SN_RATES_DEFAULT.items()},
+            "calibration": {},
+            "events": []}
+
+
+def is_sn_provider(p):
+    if not p:
+        return False
+    return p.get("id") == SN_PROVIDER_ID or "sensenova" in (p.get("base_url") or "")
+
+
+def sn_quota_record(p, model, u):
+    # 记录一次 SenseNova 调用的积分消耗（按模型倍率本地估算，校准点之后计增量）
+    try:
+        if not is_sn_provider(p) or not u:
+            return
+        pt = int(u.get("prompt_tokens") or 0)
+        ct = int(u.get("completion_tokens") or 0)
+        if not (pt or ct):
+            return
+        d = load_data()
+        q = d.setdefault("sn_quota", _default_sn_quota())
+        rates = q.setdefault("rates", {k: list(v) for k, v in SN_RATES_DEFAULT.items()})
+        r = rates.get(model)
+        if r is not None and not (r[0] or r[1]):
+            r = None
+        pts = round(pt * r[0] / 1000.0 + ct * r[1] / 1000.0, 3) if r else 0.0
+        ev = {"ts": datetime.datetime.now().isoformat(timespec="seconds"),
+              "model": model, "pt": pt, "ct": ct, "pts": pts,
+              "pool": ("flash_lite" if model in SN_FLASH_LITE_MODELS else "general")}
+        if r is None:
+            ev["rate_missing"] = True
+        q.setdefault("events", []).append(ev)
+        cut = (datetime.datetime.now() - datetime.timedelta(days=8)).isoformat()
+        q["events"] = [e for e in q["events"] if e.get("ts", "") >= cut]
+        save_data(d)
+    except Exception:
+        pass
+
+
+def _sn_parse_ts(s):
+    if not s:
+        return None
+    s = str(s).strip()[:19]
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M"):
+        try:
+            return datetime.datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _sn_parse_reset(s):
+    # 解析控制台重置时间：'9月29日 03:05' / '2026-09-29 03:05' / ISO
+    if not s:
+        return None
+    s = str(s).strip()
+    m = re.match(r"^(\d{1,2})月(\d{1,2})日\s+(\d{1,2}):(\d{2})", s)
+    now = datetime.datetime.now()
+    if m:
+        try:
+            dt = datetime.datetime(now.year, int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4)))
+        except ValueError:
+            return None
+        if dt < now - datetime.timedelta(days=7):
+            dt = dt.replace(year=now.year + 1)
+        return dt
+    return _sn_parse_ts(s)
+
+
+def sn_quota_view(d):
+    # 面板视图：双池 5h/每周（校准基线 + 校准后事件增量；flash_lite 溢出计到通用池）
+    if not any(is_sn_provider(p) for p in d.get("providers") or []):
+        return None
+    q = d.get("sn_quota") or _default_sn_quota()
+    cal = q.get("calibration") or {}
+    now = datetime.datetime.now()
+    r5 = _sn_parse_reset(cal.get("win5h_reset"))
+    rw = _sn_parse_reset(cal.get("week_reset"))
+    if r5:
+        while r5 <= now:
+            r5 += datetime.timedelta(hours=5)
+    if rw:
+        while rw <= now:
+            rw += datetime.timedelta(days=7)
+    win5h_start = (r5 - datetime.timedelta(hours=5)) if r5 else None
+    week_start = (rw - datetime.timedelta(days=7)) if rw else None
+    cal_ts = _sn_parse_ts(cal.get("ts"))
+    evs = []
+    for e in (q.get("events") or []):
+        ets = _sn_parse_ts(e.get("ts"))
+        if ets is None:
+            continue
+        if cal_ts and ets <= cal_ts:
+            continue
+        evs.append((ets, e))
+
+    def _pool(base5, basew, pool):
+        u5 = float(base5 or 0) if (cal_ts and win5h_start and cal_ts >= win5h_start) else 0.0
+        uw = float(basew or 0) if (cal_ts and week_start and cal_ts >= week_start) else 0.0
+        for ets, e in evs:
+            if e.get("pool") != pool:
+                continue
+            pts = float(e.get("pts") or 0)
+            if win5h_start is None or ets >= win5h_start:
+                u5 += pts
+            if week_start is None or ets >= week_start:
+                uw += pts
+        return u5, uw
+
+    f5, fw = _pool(cal.get("flash_5h"), cal.get("flash_week"), "flash_lite")
+    g5, gw = _pool(cal.get("general_5h"), cal.get("general_week"), "general")
+    if f5 > SN_CAP_5H:
+        g5 += f5 - SN_CAP_5H
+        f5 = SN_CAP_5H
+    if fw > SN_CAP_WEEK:
+        gw += fw - SN_CAP_WEEK
+        fw = SN_CAP_WEEK
+    used_by_model = {}
+    for ets, e in evs:
+        mk = e.get("model") or "?"
+        used_by_model[mk] = round(used_by_model.get(mk, 0.0) + float(e.get("pts") or 0), 3)
+
+    def _pv(u5, uw):
+        return {"cap_5h": SN_CAP_5H, "cap_week": SN_CAP_WEEK,
+                "used_5h": round(u5, 3), "used_week": round(uw, 3),
+                "reset_5h": r5.strftime("%m-%d %H:%M") if r5 else "",
+                "reset_week": rw.strftime("%m-%d %H:%M") if rw else ""}
+
+    return {"configured": bool(cal),
+            "pools": {"general": _pv(g5, gw), "flash_lite": _pv(f5, fw)},
+            "rates": q.get("rates") or {},
+            "calibration": cal,
+            "used_by_model": used_by_model,
+            "activity": cal.get("activity")}
+
+
 def load_data():
     with _lock:
         if not DATA_FILE.exists():
@@ -240,6 +441,8 @@ def load_data():
         d.setdefault("quota", {"synced_at": None, "entries": {}, "raw": None, "last_error": None})
         d.setdefault("ag_quota", {"accounts": [], "synced_at": "", "groups": {}})
         d.setdefault("wb_quota", {"accounts": [], "rates": {}, "synced_at": ""})
+        d.setdefault("sn_quota", _default_sn_quota())
+        d.setdefault("volc_quota", {"access_key": "", "secret_key": "", "synced_at": "", "models": {}})
         d.setdefault("hub_key", "")
         d.setdefault("harness_model", "auto")       # Harness 模型选择：auto=轮询 / 具体模型=锁定
         d.setdefault("autostart_harness", True)     # 启动器联动：Hub 启动后自动拉起 dsh
@@ -428,6 +631,25 @@ def ag_auth_files():
 AG_EGRESS_PROXY = os.environ.get("HUB_EGRESS_PROXY") or ""
 
 
+def _http_client(timeout, use_egress=False):
+    """出海渠道（如 Google）经 HUB_EGRESS_PROXY 代理出口；其余直连。"""
+    if use_egress and AG_EGRESS_PROXY:
+        try:
+            return httpx.Client(timeout=timeout, proxy=AG_EGRESS_PROXY, verify=False, trust_env=False)
+        except TypeError:  # 旧版 httpx 用 proxies=
+            return httpx.Client(timeout=timeout, proxies=AG_EGRESS_PROXY, verify=False, trust_env=False)
+    return httpx.Client(timeout=timeout, trust_env=False)
+
+
+def _async_client(timeout, use_egress=False):
+    if use_egress and AG_EGRESS_PROXY:
+        try:
+            return httpx.AsyncClient(timeout=timeout, proxy=AG_EGRESS_PROXY, verify=False, trust_env=False)
+        except TypeError:
+            return httpx.AsyncClient(timeout=timeout, proxies=AG_EGRESS_PROXY, verify=False, trust_env=False)
+    return httpx.AsyncClient(timeout=timeout, trust_env=False)
+
+
 def _ag_http_post(host, json_body, headers):
     """AG 额度查询出口：云端部署经 mihomo 容器代理访问 Google，本地直连。"""
     if AG_EGRESS_PROXY:
@@ -539,17 +761,34 @@ def _ag_set_cooldown(d, model: str):
     return gkey, until
 
 
+def model_blocked(p, model):
+    """渠道级模型过滤（2026-09-27 用户拍板）：blocklist 任一模式命中即视为该渠道不提供此模型
+    ——不进轮询、不出现在 /v1/models、面板选择列表同步隐藏。
+    默认不区分大小写子串匹配；模式以 = 开头时为精确匹配（如 =gpt-4 只挡 gpt-4、不误伤 gpt-4o）。"""
+    ml = str(model).lower()
+    for pat in (p.get("model_blocklist") or []):
+        pat = str(pat).strip().lower()
+        if not pat:
+            continue
+        if pat.startswith("="):
+            if ml == pat[1:]:
+                return True
+        elif pat in ml:
+            return True
+    return False
+
+
 def ordered_models(p):
-    """模型按用户排序（model_order）返回；未排序时按原始列表。"""
+    """模型按用户排序（model_order）返回；未排序时按原始列表。已被渠道过滤的模型不出现。"""
     models = p.get("models") or []
     order = p.get("model_order") or []
     seen, out = set(), []
     for m in order:
-        if m in models and m not in seen:
+        if m in models and m not in seen and not model_blocked(p, m):
             seen.add(m)
             out.append(m)
     for m in models:
-        if m not in seen:
+        if m not in seen and not model_blocked(p, m):
             seen.add(m)
             out.append(m)
     return out
@@ -681,11 +920,11 @@ def candidate_bases(base_url: str):
     return out
 
 
-def fetch_models(base_url: str, api_key: str):
+def fetch_models(base_url: str, api_key: str, use_egress: bool = False):
     """返回 (生效 base_url, [model_id...], 尝试记录)"""
     tried = []
     headers = {"Authorization": "Bearer " + api_key} if api_key else {}
-    with httpx.Client(timeout=20.0, trust_env=False) as cli:
+    with _http_client(20.0, use_egress) as cli:
         for b in candidate_bases(base_url):
             url = b + "/models"
             try:
@@ -701,7 +940,7 @@ def fetch_models(base_url: str, api_key: str):
     raise RuntimeError("模型列表拉取失败：" + "；".join(tried))
 
 
-def test_model(base_url: str, api_key: str, model: str):
+def test_model(base_url: str, api_key: str, model: str, use_egress: bool = False):
     """对指定模型发一个最小请求，返回 (ok, latency_ms, detail, usage)"""
     url = base_url.rstrip("/") + "/chat/completions"
     body = {"model": model, "messages": [{"role": "user", "content": "hi"}],
@@ -709,7 +948,7 @@ def test_model(base_url: str, api_key: str, model: str):
     headers = {"Authorization": "Bearer " + api_key, "Content-Type": "application/json"}
     t0 = time.time()
     try:
-        with httpx.Client(timeout=45.0, trust_env=False) as cli:
+        with _http_client(45.0, use_egress) as cli:
             r = cli.post(url, json=body, headers=headers)
         ms = int((time.time() - t0) * 1000)
         if r.status_code == 200:
@@ -832,6 +1071,7 @@ class ProviderIn(BaseModel):
     type: str = "openai"          # openai | bailian
     base_url: str
     api_key: str = ""
+    use_egress: bool = False      # 出海渠道（如 Google）走 HUB_EGRESS_PROXY
 
 
 class ProviderUpdate(BaseModel):
@@ -839,6 +1079,8 @@ class ProviderUpdate(BaseModel):
     base_url: str | None = None
     api_key: str | None = None
     allow_paid: bool | None = None
+    use_egress: bool | None = None
+    model_blocklist: list[str] | None = None   # 渠道级模型过滤（子串、不区分大小写）
 
 
 class ModelIn(BaseModel):
@@ -881,6 +1123,8 @@ def state():
         "quota": d["quota"],
         "ag_quota": d.get("ag_quota") or {"accounts": [], "synced_at": "", "groups": {}},
         "wb_quota": d.get("wb_quota") or {"accounts": [], "rates": {}, "synced_at": ""},
+        "sn_quota": sn_quota_view(d),
+        "volc_quota": volc_quota_view(d),
         "bl_installed": bool(bl),
         "hub_base": HUB_BASE,
         "public_base": PUBLIC_BASE,
@@ -912,13 +1156,15 @@ def add_provider(inp: ProviderIn):
         "api_key": inp.api_key.strip(),
         "models": [],
         "model_order": None,
+        "model_blocklist": [],
         "allow_paid": False,
+        "use_egress": bool(inp.use_egress),
         "active_model": None,
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "last_refresh": None,
     }
     try:
-        eff, ids, _ = fetch_models(p["base_url"], p["api_key"])
+        eff, ids, _ = fetch_models(p["base_url"], p["api_key"], use_egress=p["use_egress"])
         p["base_url"] = eff
         p["models"] = ids
         p["last_refresh"] = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -943,6 +1189,10 @@ def update_provider(pid: str, inp: ProviderUpdate):
         p["api_key"] = inp.api_key.strip()
     if inp.allow_paid is not None:
         p["allow_paid"] = bool(inp.allow_paid)
+    if inp.use_egress is not None:
+        p["use_egress"] = bool(inp.use_egress)
+    if inp.model_blocklist is not None:
+        p["model_blocklist"] = [str(x).strip() for x in inp.model_blocklist if str(x).strip()]
     save_data(d)
     return {"ok": True, "allow_paid": p["allow_paid"]}
 
@@ -962,7 +1212,7 @@ def delete_provider(pid: str):
 def refresh_models(pid: str):
     d, p = get_provider(pid)
     try:
-        eff, ids, tried = fetch_models(p["base_url"], p["api_key"])
+        eff, ids, tried = fetch_models(p["base_url"], p["api_key"], use_egress=bool(p.get("use_egress")))
     except Exception as e:
         p["fetch_error"] = str(e)
         save_data(d)
@@ -974,16 +1224,24 @@ def refresh_models(pid: str):
     elif "8317" in (p.get("base_url") or ""):
         ids = [m for m in ids if not str(m).startswith(WB_MODEL_PREFIXES)]
     if p.get("type") == "bailian":
-        # 百炼（2026-09-21 用户拍板）：只保留「文本生成 / 多模态」且当前有可用免费额度的模型；
-        # 音频 / 向量 / 重排序 / 图像生成与 237 个无免费额度模型一律不进列表。
+        # 百炼（2026-09-26 用户拍板，取代 09-21 版）：保留「文本生成 / 多模态 / 语音合成 / 语音识别 / 视频生成」
+        # 且当前有可用免费额度的模型；上游 /models 不返回的语音/视频模型，按额度台账并集补回。
         quota_ready = bool((d.get("quota") or {}).get("entries"))
+        keep_cats = ("文本生成", "多模态", "语音合成", "语音识别", "视频生成")
         filtered = []
         for m in ids:
-            if model_category(m) not in ("文本生成", "多模态"):
+            if model_category(m) not in keep_cats:
                 continue
             if quota_ready and quota_state(d, m)[0] != "free_ok":
                 continue
             filtered.append(m)
+        if quota_ready:
+            # 并集补回：上游 /models 不列出 wan 视频 / sambert / cosyvoice 等，但额度台账里有免费额度
+            for m in (d.get("quota") or {}).get("entries") or {}:
+                if m in filtered or model_category(m) not in keep_cats:
+                    continue
+                if quota_state(d, m)[0] == "free_ok":
+                    filtered.append(m)
         if filtered:
             ids = filtered
         elif p.get("models"):
@@ -1091,7 +1349,7 @@ def test(pid: str, inp: ModelIn):
                       "ok": False, "blocked": True, "latency_ms": 0,
                       "error": "AG 组额度拦截：" + msg})
             return {"ok": False, "blocked": True, "latency_ms": 0, "detail": msg + "，未发起调用。"}
-    ok, ms, detail, usage = test_model(p["base_url"], p["api_key"], inp.model)
+    ok, ms, detail, usage = test_model(p["base_url"], p["api_key"], inp.model, use_egress=bool(p.get("use_egress")))
     p.setdefault("test_results", {})[inp.model] = {
         "ok": ok, "latency_ms": ms, "detail": detail,
         "at": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -1149,15 +1407,103 @@ def _norm_pool_models(d, items):
     return out
 
 
+def _brand_of(p):
+    """渠道品牌归类（2026-09-25 R49 拍板）：同品牌多账号合并进同一个渠道号池。
+    返回 (brand_key, brand_name)；未知品牌按渠道名独立成池（一一对应兜底）。"""
+    name = (p.get("name") or "")
+    url = (p.get("base_url") or "").lower()
+    if p.get("type") == "bailian":
+        return "bailian", "百炼"
+    if is_ag_provider(p):
+        return "ag", "反重力"
+    if is_wb_provider(p):
+        return "workbuddy", "WorkBuddy"
+    if p.get("type") == "openai" and ":4141" in url:
+        return "copilot", "GitHub Copilot"
+    if "generativelanguage.googleapis.com" in url:
+        return "google", "Google AI Studio"
+    if "deepseek" in url or "deepseek" in name.lower():
+        return "deepseek", "DeepSeek"
+    if "volces.com" in url or "volcengine" in url or "火山" in name:
+        return "volcengine", "火山引擎"
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+    return "x_" + (slug or p["id"]), name or p["id"]
+
+
+def _find_or_create_channel_pool(d, p):
+    """给渠道找/建所属渠道号池：先 channel_pid 直挂池，再同品牌归并，最后新建。
+    返回 (pool, created)。"""
+    brand, bname = _brand_of(p)
+    pools = d.setdefault("pools", [])
+    provs = {x.get("id"): x for x in d.get("providers") or []}
+    for pl in pools:
+        if pl.get("channel_pid") == p["id"]:
+            return pl, False
+    for pl in pools:
+        if pl.get("channel_brand") and pl.get("channel_brand") == brand:
+            return pl, False
+    for pl in pools:
+        cp = provs.get(pl.get("channel_pid") or "")
+        if cp and _brand_of(cp)[0] == brand:
+            return pl, False
+    # 收养旧版同品牌池（无 channel 标记、无模型、现有成员全是同品牌）——保留原名与池 key；
+    # 内置默认号池除外（用户拍板可删，不许借尸还魂）
+    for pl in pools:
+        if pl.get("channel_brand") or pl.get("channel_pid") or pl.get("models"):
+            continue
+        if pl.get("id") == "pool_default" or pl.get("name") == "默认号池":
+            continue
+        members = [q for q in (d.get("providers") or []) if q.get("pool_id") == pl["id"]]
+        if members and all(_brand_of(q)[0] == brand for q in members):
+            pl["channel_brand"] = brand
+            return pl, True
+    pl = {"id": "pool_" + uuid.uuid4().hex[:8], "name": bname,
+          "created_at": now_str(), "key": _pool_new_key(),
+          "channel_brand": brand, "models": []}
+    pools.append(pl)
+    return pl, True
+
+
+def _migrate_provider_pools(d):
+    """渠道自动归并渠道号池（2026-09-25 R49 拍板，幂等）：
+    - 每个 provider 归并到同品牌渠道号池（无则新建，池 key 自动生成）；
+    - 归并后的空壳池（无渠道、无模型、无 channel 标记）自动删除，至少保留一个池。"""
+    changed = False
+    for p in d.get("providers") or []:
+        pl, created = _find_or_create_channel_pool(d, p)
+        if created:
+            changed = True
+        if p.get("pool_id") != pl["id"]:
+            p["pool_id"] = pl["id"]
+            changed = True
+    pools = d.get("pools") or []
+    used = {p.get("pool_id") for p in d.get("providers") or []}
+    shells = [pl for pl in pools
+              if pl["id"] not in used and not pl.get("models")
+              and not pl.get("channel_pid") and not pl.get("channel_brand")]
+    if shells and len(pools) - len(shells) >= 1:
+        d["pools"] = [pl for pl in pools if pl not in shells]
+        changed = True
+    if changed:
+        for pl in d["pools"]:
+            if not pl.get("key"):
+                pl["key"] = _pool_new_key()
+        save_data(d)
+    return changed
+
+
 def _pool_view(d):
     _ensure_pool_keys(d)
+    _migrate_provider_pools(d)
     out = []
     for pl in d.get("pools") or []:
         provs = [p for p in d["providers"] if p.get("pool_id") == pl["id"]]
         out.append({"id": pl["id"], "name": pl.get("name") or pl["id"],
                     "key": pl.get("key") or "",
                     "models": pl.get("models") or [],
-                    "providers": [p["id"] for p in provs]})
+                    "providers": [p["id"] for p in provs],
+                    "channel_pid": pl.get("channel_pid") or "",
+                    "channel_brand": pl.get("channel_brand") or ""})
     known = {pl["id"] for pl in d.get("pools") or []}
     rest = [p for p in d["providers"] if p.get("pool_id") not in known]
     if rest:
@@ -1923,7 +2269,7 @@ def hub_models(req: Request):
     seen = {"auto"}
     # 渠道隔离（2026-09-24）：唯一渠道的模型出裸 id；同名多渠道各出一条「渠道名::模型名」限定 id，不再归并。
     if scope is not None:
-        pairs = pool_scope_candidates(d, scope, extra_cats={"图像生成"})
+        pairs = pool_scope_candidates(d, scope, extra_cats={"图像生成", "视频生成", "语音合成", "语音识别"})
     else:
         pairs = [(p, m) for p in d["providers"]
                  for m in chat_candidates(d, p, extra_cats={"图像生成"})]
@@ -1936,8 +2282,8 @@ def hub_models(req: Request):
                 continue
             seen.add(m)
             data.append({"id": m, "object": "model",
-                         "owned_by": (scope.get("name") if scope is not None else None)
-                         or ps[0].get("name") or ps[0].get("type") or "provider"})
+                         "owned_by": ps[0].get("name") or ps[0].get("type")
+                         or (scope.get("name") if scope is not None else None) or "provider"})
         else:
             for p in ps:
                 qid = "%s::%s" % (p.get("name") or p.get("id"), m)
@@ -1962,6 +2308,7 @@ async def hub_chat(req: Request):
     d = load_data()
     scope = _require_hub_key(d, req)
     hk = getattr(req.state, "hub_key_entry", None)
+    _set_log_ctx(hk, scope)
     if hk is not None:
         rl = _key_quota_check(hk, body)
         if rl is not None:
@@ -2036,6 +2383,8 @@ async def hub_chat(req: Request):
                 "message": "模型 %s 不在号池「%s」范围内，已拦截。" % (model, scope.get("name")),
                 "type": "hub_pool_scope"}})
 
+    scoped = _demote_failed(scoped)
+
     if model == "auto":
         if not scoped:
             log_call({"source": "proxy", "provider": None,
@@ -2085,9 +2434,9 @@ async def hub_chat(req: Request):
                     "type": "hub_ag_group_blocked"}})
 
     if stream:
-        # 流式不做轮询，直接用第一个候选透传
-        p0, m0 = scoped[0]
-        return await _forward_stream(p0, body, m0, model_requested=model, hk=hk)
+        # 流式故障转移（R59 2026-09-26）：未出内容前失败静默换下一个候选；
+        # 已出内容中途断流 → 已输出文本作 assistant 前缀续写；全失败且未出内容 → 返回最后错误
+        return await _forward_stream_failover(scoped, body, model_requested=model, hk=hk)
 
     last = None
     cooled_groups = set()
@@ -2102,6 +2451,7 @@ async def hub_chat(req: Request):
         code, resp, ms = await _forward_chat(p, body, m)
         usage = resp.get("usage") if code == 200 and isinstance(resp, dict) else None
         u = usage or {}
+        sn_quota_record(p, m, u)
         log_call({"source": "proxy", "provider": p.get("name"),
                   "model_requested": model, "model_used": m,
                   "ok": code == 200, "status": code, "latency_ms": ms,
@@ -2112,9 +2462,11 @@ async def hub_chat(req: Request):
                   "error": None if code == 200 else
                            (json.dumps(resp, ensure_ascii=False)[:300] if isinstance(resp, dict) else str(resp)[:300])})
         if code == 200:
+            _cand_mark_ok(p.get("id"), m)
             _key_quota_record(hk, u.get("total_tokens"))
             return JSONResponse(content=resp,
                                 headers={"X-Hub-Model": m, "X-Hub-Provider": p.get("id")})
+        _cand_mark_fail(p.get("id"), m)
         last = (p, m, code, resp)
         if not _quota_like(code, resp):
             break
@@ -2138,8 +2490,8 @@ async def _forward_chat(p, body, model):
     url = p["base_url"].rstrip("/") + "/chat/completions"
     t0 = time.time()
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=20.0),
-                                     trust_env=False) as cli:
+        async with _async_client(httpx.Timeout(120.0, connect=20.0),
+                                 bool(p.get("use_egress"))) as cli:
             r = await cli.post(url, json=b, headers=headers)
         ms = int((time.time() - t0) * 1000)
         try:
@@ -2155,14 +2507,14 @@ async def _forward_stream(p, body, model, model_requested=None, hk=None):
     b = dict(body)
     b["model"] = model
     # 用户级 key 带每日 token 额度时，让上游在流尾回传 usage，便于记账
-    if hk is not None and int(((hk.get("quota") or {}).get("daily_tokens")) or 0):
+    if (hk is not None and int(((hk.get("quota") or {}).get("daily_tokens")) or 0)) or is_sn_provider(p):
         so = dict(b.get("stream_options") or {})
         so["include_usage"] = True
         b["stream_options"] = so
     headers = {"Authorization": "Bearer " + p["api_key"], "Content-Type": "application/json"}
     url = p["base_url"].rstrip("/") + "/chat/completions"
     t0 = time.time()
-    client = httpx.AsyncClient(timeout=httpx.Timeout(180.0, connect=20.0), trust_env=False)
+    client = _async_client(httpx.Timeout(180.0, connect=20.0), bool(p.get("use_egress")))
     request = client.build_request("POST", url, json=b, headers=headers)
     resp = await client.send(request, stream=True)
 
@@ -2170,7 +2522,7 @@ async def _forward_stream(p, body, model, model_requested=None, hk=None):
         tail = ""
         try:
             async for chunk in resp.aiter_raw():
-                if hk is not None:
+                if hk is not None or is_sn_provider(p):
                     tail = (tail + chunk.decode("utf-8", "replace"))[-4000:]
                 yield chunk
         finally:
@@ -2180,16 +2532,332 @@ async def _forward_stream(p, body, model, model_requested=None, hk=None):
                       "ok": resp.status_code == 200, "status": resp.status_code,
                       "latency_ms": ms, "stream": True,
                       "error": None if resp.status_code == 200 else "stream HTTP %d" % resp.status_code})
-            if hk is not None:
-                mts = re.findall(r'"total_tokens"\s*:\s*(\d+)', tail)
-                if mts:
-                    _key_quota_record(hk, int(mts[-1]))
+            mts = re.findall(r'"total_tokens"\s*:\s*(\d+)', tail)
+            if hk is not None and mts:
+                _key_quota_record(hk, int(mts[-1]))
+            if is_sn_provider(p):
+                mps = re.findall(r'"prompt_tokens"\s*:\s*(\d+)', tail)
+                mcs = re.findall(r'"completion_tokens"\s*:\s*(\d+)', tail)
+                if mps or mcs:
+                    sn_quota_record(p, model, {"prompt_tokens": int(mps[-1]) if mps else 0,
+                                               "completion_tokens": int(mcs[-1]) if mcs else 0,
+                                               "total_tokens": int(mts[-1]) if mts else 0})
             await resp.aclose()
             await client.aclose()
 
     return StreamingResponse(gen(), status_code=resp.status_code,
                              media_type="text/event-stream",
                              headers={"X-Hub-Model": model})
+
+
+# ---------------- 流式故障转移 + 候选健康降级（R59 2026-09-26 用户拍板） ----------------
+# 近 60 秒内失败过的 (provider_id, model) 候选自动排到队尾（不剔除，给恢复机会）；
+# 成功一次即清除记录。内存态，hub 重启清零。
+_STREAM_FAILS = {}
+STREAM_FAIL_COOLDOWN = 60.0
+
+
+def _cand_mark_fail(pid, model):
+    _STREAM_FAILS[(pid, model)] = time.time()
+
+
+def _cand_mark_ok(pid, model):
+    _STREAM_FAILS.pop((pid, model), None)
+
+
+def _demote_failed(scoped):
+    if not _STREAM_FAILS or len(scoped) < 2:
+        return scoped
+    now = time.time()
+
+    def rank(item):
+        ts = _STREAM_FAILS.get((item[0].get("id"), item[1]))
+        return 1 if (ts and now - ts < STREAM_FAIL_COOLDOWN) else 0
+    return sorted(scoped, key=rank)
+
+
+async def _forward_stream_failover(scoped, body, model_requested=None, hk=None):
+    """流式 + 候选故障转移（R59）。
+    - 建立阶段失败（连接错误 / 非 200）→ 静默换下一个候选，客户端无感；
+    - 已输出内容中途断流 → 已输出文本作 assistant 前缀并入 messages，换下一个候选续写；
+    - 全部候选失败：未输出过内容 → 返回最后错误；已输出过 → error 事件 + [DONE] 干净收尾。"""
+    first_model = scoped[0][1] if scoped else None
+    last_code, last_err = 502, "没有可用候选"
+    for idx, (p, m) in enumerate(scoped):
+        b = dict(body)
+        b["model"] = m
+        if (hk is not None and int(((hk.get("quota") or {}).get("daily_tokens")) or 0)) or is_sn_provider(p):
+            so = dict(b.get("stream_options") or {})
+            so["include_usage"] = True
+            b["stream_options"] = so
+        headers = {"Authorization": "Bearer " + p["api_key"], "Content-Type": "application/json"}
+        url = p["base_url"].rstrip("/") + "/chat/completions"
+        t0 = time.time()
+        client = _async_client(httpx.Timeout(180.0, connect=20.0), bool(p.get("use_egress")))
+        try:
+            request = client.build_request("POST", url, json=b, headers=headers)
+            resp = await client.send(request, stream=True)
+        except Exception as e:
+            ms = int((time.time() - t0) * 1000)
+            log_call({"source": "proxy", "provider": p.get("name"),
+                      "model_requested": model_requested or m, "model_used": m,
+                      "ok": False, "latency_ms": ms, "stream": True,
+                      "rotated": idx > 0 or (first_model is not None and m != first_model),
+                      "error": "stream 连接失败：%s: %s" % (type(e).__name__, e)})
+            _cand_mark_fail(p.get("id"), m)
+            await client.aclose()
+            last_code, last_err = 502, "%s: %s" % (type(e).__name__, e)
+            continue
+        if resp.status_code != 200:
+            err_body = (await resp.aread()).decode("utf-8", "replace")[:300]
+            ms = int((time.time() - t0) * 1000)
+            log_call({"source": "proxy", "provider": p.get("name"),
+                      "model_requested": model_requested or m, "model_used": m,
+                      "ok": False, "status": resp.status_code, "latency_ms": ms, "stream": True,
+                      "rotated": idx > 0 or (first_model is not None and m != first_model),
+                      "error": "stream HTTP %d %s" % (resp.status_code, err_body[:120])})
+            _cand_mark_fail(p.get("id"), m)
+            await resp.aclose()
+            await client.aclose()
+            last_code, last_err = resp.status_code, (err_body or "HTTP %d" % resp.status_code)
+            continue
+        # 200：开始透传；中途断流由生成器用剩余候选续写
+        gen = _stream_gen_failover(p, m, resp, client, t0, body, list(scoped[idx + 1:]),
+                                   model_requested=model_requested, hk=hk,
+                                   first_model=first_model)
+        return StreamingResponse(gen, status_code=200, media_type="text/event-stream",
+                                 headers={"X-Hub-Model": m, "X-Hub-Provider": p.get("id") or ""})
+    code = last_code if (isinstance(last_code, int) and 400 <= last_code < 600) else 502
+    return JSONResponse(status_code=code,
+                        content={"error": {"message": "全部候选均不可用：%s" % str(last_err)[:300],
+                                           "type": "hub_all_candidates_failed"}})
+
+
+async def _stream_gen_failover(p, m, resp, client, t0, body, rest,
+                               model_requested=None, hk=None, first_model=None):
+    """单条流式腿透传 + 断流续写。腿内解析 delta.content 累积已输出文本（跨 chunk 缓冲），
+    断流时作为 assistant 前缀并入 messages 换 rest 中下一个候选继续；[DONE] 正常结束。"""
+    emitted = ""
+    tail = ""
+    parse_buf = ""
+    saw_done = False
+    orig_messages = body.get("messages") or []
+    cur_p, cur_m, cur_resp, cur_client, cur_t0 = p, m, resp, client, t0
+    try:
+        while True:
+            leg_err = ""
+            try:
+                async for chunk in cur_resp.aiter_raw():
+                    text = chunk.decode("utf-8", "replace")
+                    if hk is not None or is_sn_provider(cur_p):
+                        tail = (tail + text)[-4000:]
+                    # 尽力解析增量正文（供续写前缀）；解析失败不影响透传
+                    parse_buf += text
+                    lines = parse_buf.split("\n")
+                    parse_buf = lines.pop()
+                    for line in lines:
+                        line = line.strip()
+                        if not line.startswith("data:"):
+                            continue
+                        data = line[5:].strip()
+                        if data == "[DONE]":
+                            saw_done = True
+                            continue
+                        try:
+                            j = json.loads(data)
+                            for ch in (j.get("choices") or []):
+                                dc = (ch.get("delta") or {}).get("content")
+                                if dc:
+                                    emitted += dc
+                        except Exception:
+                            pass
+                    yield chunk
+            except Exception as e:
+                leg_err = "%s: %s" % (type(e).__name__, e)
+            # 腿结束：记账 + 关上游
+            ms = int((time.time() - cur_t0) * 1000)
+            leg_ok = saw_done and not leg_err
+            log_call({"source": "proxy", "provider": cur_p.get("name"),
+                      "model_requested": model_requested or cur_m, "model_used": cur_m,
+                      "ok": leg_ok, "status": cur_resp.status_code, "latency_ms": ms,
+                      "stream": True,
+                      "rotated": (first_model is not None and cur_m != first_model),
+                      "error": None if leg_ok else (leg_err or "流提前结束（未见 [DONE]）")})
+            if leg_ok:
+                _cand_mark_ok(cur_p.get("id"), cur_m)
+            else:
+                _cand_mark_fail(cur_p.get("id"), cur_m)
+            try:
+                await cur_resp.aclose()
+                await cur_client.aclose()
+            except Exception:
+                pass
+            if leg_ok:
+                break
+            if not rest:
+                # 无后备候选：补 error 事件 + [DONE]，让客户端干净收尾
+                yield ('data: {"error": {"message": "上游中断且无后备候选：%s"}}\n\n'
+                       % (leg_err or "流提前结束")).encode("utf-8")
+                yield b"data: [DONE]\n\n"
+                break
+            # 换下一个候选续写
+            np, nm = rest.pop(0)
+            nb = dict(body)
+            nb["model"] = nm
+            if emitted:
+                nb["messages"] = orig_messages + [{"role": "assistant", "content": emitted}]
+            if (hk is not None and int(((hk.get("quota") or {}).get("daily_tokens")) or 0)) or is_sn_provider(np):
+                so = dict(nb.get("stream_options") or {})
+                so["include_usage"] = True
+                nb["stream_options"] = so
+            headers = {"Authorization": "Bearer " + np["api_key"], "Content-Type": "application/json"}
+            url = np["base_url"].rstrip("/") + "/chat/completions"
+            cur_t0 = time.time()
+            cur_client = _async_client(httpx.Timeout(180.0, connect=20.0), bool(np.get("use_egress")))
+            try:
+                req2 = cur_client.build_request("POST", url, json=nb, headers=headers)
+                cur_resp = await cur_client.send(req2, stream=True)
+            except Exception as e:
+                log_call({"source": "proxy", "provider": np.get("name"),
+                          "model_requested": model_requested or nm, "model_used": nm,
+                          "ok": False, "latency_ms": int((time.time() - cur_t0) * 1000),
+                          "stream": True, "rotated": True,
+                          "error": "续写连接失败：%s: %s" % (type(e).__name__, e)})
+                _cand_mark_fail(np.get("id"), nm)
+                try:
+                    await cur_client.aclose()
+                except Exception:
+                    pass
+                continue
+            if cur_resp.status_code != 200:
+                eb = (await cur_resp.aread()).decode("utf-8", "replace")[:300]
+                log_call({"source": "proxy", "provider": np.get("name"),
+                          "model_requested": model_requested or nm, "model_used": nm,
+                          "ok": False, "status": cur_resp.status_code,
+                          "latency_ms": int((time.time() - cur_t0) * 1000),
+                          "stream": True, "rotated": True,
+                          "error": "续写 HTTP %d %s" % (cur_resp.status_code, eb[:120])})
+                _cand_mark_fail(np.get("id"), nm)
+                try:
+                    await cur_resp.aclose()
+                    await cur_client.aclose()
+                except Exception:
+                    pass
+                continue
+            cur_p, cur_m = np, nm
+            saw_done = False
+            parse_buf = ""
+            # 回到 while 顶部透传新腿
+    finally:
+        mts = re.findall(r'"total_tokens"\s*:\s*(\d+)', tail)
+        if hk is not None and mts:
+            _key_quota_record(hk, int(mts[-1]))
+        if is_sn_provider(cur_p):
+            mps = re.findall(r'"prompt_tokens"\s*:\s*(\d+)', tail)
+            mcs = re.findall(r'"completion_tokens"\s*:\s*(\d+)', tail)
+            if mps or mcs:
+                sn_quota_record(cur_p, cur_m, {"prompt_tokens": int(mps[-1]) if mps else 0,
+                                               "completion_tokens": int(mcs[-1]) if mcs else 0,
+                                               "total_tokens": int(mts[-1]) if mts else 0})
+        # 防御：正常路径每条腿结束都已关闭；客户端断连等异常逃逸时兜底
+        try:
+            await cur_resp.aclose()
+            await cur_client.aclose()
+        except Exception:
+            pass
+
+
+# ---------------- 图像生成转发（R54，2026-09-24） ----------------
+
+@app.post("/v1/images/generations")
+async def hub_images(req: Request):
+    """OpenAI 兼容出图入口（与 /v1/chat/completions 同套 hub_key 鉴权与号池隔离）。
+    - 必须显式指定模型（图像模型不进 auto 轮询）；支持「渠道名::模型名」与 X-Hub-Provider 限定渠道。
+    - 请求体原样转发到命中渠道的 /images/generations；响应（b64_json / url）原样回传。
+    - 响应头 X-Hub-Model / X-Hub-Provider 标明实际命中的模型与渠道。"""
+    body = await req.json()
+    d = load_data()
+    scope = _require_hub_key(d, req)
+    hk = getattr(req.state, "hub_key_entry", None)
+    _set_log_ctx(hk, scope)
+    if hk is not None:
+        # rpm/日额度照常记账；max_tokens 钳制对出图请求无意义，检查完还原，避免污染上游参数。
+        _had_mt = "max_tokens" in body
+        _old_mt = body.get("max_tokens")
+        rl = _key_quota_check(hk, body)
+        if _had_mt:
+            body["max_tokens"] = _old_mt
+        else:
+            body.pop("max_tokens", None)
+        if rl is not None:
+            log_call({"source": "proxy", "provider": None,
+                      "model_requested": body.get("model") or "", "model_used": None,
+                      "ok": False, "blocked": True, "latency_ms": 0,
+                      "error": "key 配额拦截：" + rl[1]["type"]})
+            return JSONResponse(status_code=rl[0], content={"error": rl[1]})
+    model_requested = str(body.get("model") or "").strip()
+    if not model_requested or model_requested == "auto":
+        return JSONResponse(status_code=400, content={"error": {
+            "message": "出图接口必须显式指定模型（图像模型不参与 auto 轮询）。",
+            "type": "hub_model_required"}})
+    if req.headers.get("x-hub-provider"):
+        p = _pick_provider(d, req)
+        model = model_requested.partition("::")[2].strip() if "::" in model_requested else model_requested
+        if model not in (p.get("models") or []):
+            raise HTTPException(404, "渠道「%s」没有模型 %s" % (p.get("name"), model))
+    else:
+        p, model, me = resolve_model(d, model_requested, scope=scope, extra_cats={"图像生成"})
+        if me:
+            log_call({"source": "proxy", "provider": None,
+                      "model_requested": model_requested, "model_used": None,
+                      "ok": False, "blocked": True, "latency_ms": 0,
+                      "error": "同名模型隔离拦截：" + model_requested})
+            return JSONResponse(status_code=me[0], content={"error": {
+                "message": me[1], "type": "hub_model_ambiguous"}})
+        if p is None:
+            if scope is not None:
+                return JSONResponse(status_code=403, content={"error": {
+                    "message": "模型 %s 不在号池「%s」范围内，已拦截。" % (model_requested, scope.get("name")),
+                    "type": "hub_pool_scope"}})
+            raise HTTPException(404, "没有渠道提供模型 %s" % model_requested)
+    if scope is not None and (p["id"], model) not in pool_scope_set(d, scope, extra_cats={"图像生成"}):
+        log_call({"source": "proxy", "provider": p.get("name"),
+                  "model_requested": model_requested, "model_used": model,
+                  "ok": False, "blocked": True, "latency_ms": 0,
+                  "error": "号池范围拦截：" + model})
+        return JSONResponse(status_code=403, content={"error": {
+            "message": "模型 %s 不在号池「%s」范围内，已拦截。" % (model, scope.get("name")),
+            "type": "hub_pool_scope"}})
+
+    b = dict(body)
+    b["model"] = model
+    headers = {"Authorization": "Bearer " + p["api_key"], "Content-Type": "application/json"}
+    url = p["base_url"].rstrip("/") + "/images/generations"
+    t0 = time.time()
+    try:
+        async with _async_client(httpx.Timeout(300.0, connect=20.0),
+                                 bool(p.get("use_egress"))) as cli:
+            r = await cli.post(url, json=b, headers=headers)
+        ms = int((time.time() - t0) * 1000)
+        log_call({"source": "proxy", "provider": p.get("name"),
+                  "model_requested": model_requested, "model_used": model,
+                  "ok": r.status_code == 200, "status": r.status_code,
+                  "latency_ms": ms,
+                  "error": None if r.status_code == 200 else "images HTTP %d" % r.status_code})
+        hdrs = {"X-Hub-Model": model, "X-Hub-Provider": p.get("id") or ""}
+        try:
+            return JSONResponse(status_code=r.status_code, content=r.json(), headers=hdrs)
+        except Exception:
+            return Response(content=r.content, status_code=r.status_code,
+                            media_type=r.headers.get("content-type"), headers=hdrs)
+    except Exception as e:
+        ms = int((time.time() - t0) * 1000)
+        log_call({"source": "proxy", "provider": p.get("name"),
+                  "model_requested": model_requested, "model_used": model,
+                  "ok": False, "latency_ms": ms,
+                  "error": "images 转发异常：{}: {}".format(type(e).__name__, e)})
+        return JSONResponse(status_code=502, content={"error": {
+            "message": "{}: {}".format(type(e).__name__, e), "type": "hub_upstream_error"}})
 
 
 # ---------------- Claude Code 适配（Anthropic Messages API） ----------------
@@ -2323,15 +2991,17 @@ def _anth_err(status, message):
                         content={"type": "error", "error": {"type": "api_error", "message": message}})
 
 
-async def _anth_forward_stream(p, body, model, model_requested):
+async def _anth_forward_stream(p, body, model, model_requested, hk=None):
     """流式：上游 OpenAI SSE -> Anthropic SSE 事件序列"""
     b = dict(body)
     b["model"] = model
     b["stream"] = True
+    if (hk is not None and int((hk.get("quota") or {}).get("daily_tokens") or 0)) or is_sn_provider(p):
+        b["stream_options"] = {"include_usage": True}
     headers = {"Authorization": "Bearer " + p["api_key"], "Content-Type": "application/json"}
     url = p["base_url"].rstrip("/") + "/chat/completions"
     t0 = time.time()
-    client = httpx.AsyncClient(timeout=httpx.Timeout(180.0, connect=20.0), trust_env=False)
+    client = _async_client(httpx.Timeout(180.0, connect=20.0), bool(p.get("use_egress")))
     request = client.build_request("POST", url, json=b, headers=headers)
     resp = await client.send(request, stream=True)
 
@@ -2342,6 +3012,8 @@ async def _anth_forward_stream(p, body, model, model_requested):
         next_idx = 0
         stop_reason = "end_turn"
         out_tokens = 0
+        in_tokens = 0
+        tot_tokens = 0
 
         def sse(ev, data):
             return ("event: %s\ndata: %s\n\n" % (ev, json.dumps(data, ensure_ascii=False))).encode()
@@ -2369,7 +3041,10 @@ async def _anth_forward_stream(p, body, model, model_requested):
                 except Exception:
                     continue
                 if isinstance(chunk.get("usage"), dict):
-                    out_tokens = chunk["usage"].get("completion_tokens") or out_tokens
+                    _u = chunk["usage"]
+                    out_tokens = _u.get("completion_tokens") or out_tokens
+                    in_tokens = _u.get("prompt_tokens") or in_tokens
+                    tot_tokens = _u.get("total_tokens") or tot_tokens
                 ch = (chunk.get("choices") or [{}])[0]
                 delta = ch.get("delta") or {}
                 fr = ch.get("finish_reason")
@@ -2419,6 +3094,12 @@ async def _anth_forward_stream(p, body, model, model_requested):
                       "ok": resp.status_code == 200, "status": resp.status_code,
                       "latency_ms": ms, "stream": True,
                       "error": None if resp.status_code == 200 else "stream HTTP %d" % resp.status_code})
+            if hk is not None and (tot_tokens or in_tokens or out_tokens):
+                _key_quota_record(hk, tot_tokens or ((in_tokens or 0) + (out_tokens or 0)))
+            if is_sn_provider(p) and (in_tokens or out_tokens):
+                sn_quota_record(p, model, {"prompt_tokens": in_tokens or 0,
+                                           "completion_tokens": out_tokens or 0,
+                                           "total_tokens": tot_tokens or ((in_tokens or 0) + (out_tokens or 0))})
             await resp.aclose()
             await client.aclose()
 
@@ -2435,6 +3116,7 @@ async def anth_messages(req: Request):
     d = load_data()
     scope = _require_hub_key_anth(d, req)
     hk = getattr(req.state, "hub_key_entry", None)
+    _set_log_ctx(hk, scope)
     if hk is not None:
         rl = _key_quota_check(hk, body)
         if rl is not None:
@@ -2510,7 +3192,7 @@ async def anth_messages(req: Request):
 
     if stream:
         p0, m0 = scoped[0]
-        return await _anth_forward_stream(p0, obody, m0, model)
+        return await _anth_forward_stream(p0, obody, m0, model, hk=hk)
 
     last = None
     first_model = scoped[0][1]
@@ -2519,6 +3201,7 @@ async def anth_messages(req: Request):
         usage = resp.get("usage") if code == 200 and isinstance(resp, dict) else None
         u = usage or {}
         _key_quota_record(hk, u.get("total_tokens"))
+        sn_quota_record(p, m, u)
         log_call({"source": "proxy-anthropic", "provider": p.get("name"),
                   "model_requested": body.get("model") or "auto", "model_used": m,
                   "ok": code == 200, "status": code, "latency_ms": ms,
@@ -2560,10 +3243,231 @@ async def anth_count_tokens(req: Request):
 
 # ---------------- 调用监控（日志查询 / 统计 / 清空） ----------------
 
+# ---------------- SenseNova 额度 API（人工校准 + 倍率维护） ----------------
+
+@app.get("/api/sn/quota")
+def api_sn_quota():
+    return {"sn_quota": sn_quota_view(load_data())}
+
+
+@app.post("/api/sn/quota/calibrate")
+async def api_sn_calibrate(req: Request):
+    body = await req.json()
+
+    def _f(x):
+        if x is None or str(x).strip() == "":
+            return 0.0
+        return float(str(x).replace(",", "").strip())
+
+    d = load_data()
+    q = d.setdefault("sn_quota", _default_sn_quota())
+    cal = {"ts": datetime.datetime.now().isoformat(timespec="seconds"),
+           "general_5h": _f(body.get("general_5h")),
+           "general_week": _f(body.get("general_week")),
+           "flash_5h": _f(body.get("flash_5h")),
+           "flash_week": _f(body.get("flash_week")),
+           "win5h_reset": str(body.get("win5h_reset") or "").strip(),
+           "week_reset": str(body.get("week_reset") or "").strip(),
+           "activity": _f(body.get("activity"))}
+    q["calibration"] = cal
+    q["events"] = []
+    save_data(d)
+    return {"ok": True, "calibration": cal, "view": sn_quota_view(load_data())}
+
+
+@app.post("/api/sn/quota/rates")
+async def api_sn_rates(req: Request):
+    body = await req.json()
+    d = load_data()
+    q = d.setdefault("sn_quota", _default_sn_quota())
+    cur = q.setdefault("rates", {k: list(v) for k, v in SN_RATES_DEFAULT.items()})
+    for m, v in (body.get("rates") or {}).items():
+        if isinstance(v, (list, tuple)) and len(v) >= 2:
+            cur[m] = [float(v[0]), float(v[1]), (v[2] if len(v) > 2 else "manual")]
+    save_data(d)
+    return {"ok": True, "rates": cur}
+
+
+# ---------------- 火山方舟免费额度（GetModelActivation / ListModelActivations，账号 AK V4 签名只读查询） ----------------
+import hashlib
+import hmac
+import urllib.request
+import urllib.error
+
+VOLC_API_HOST = "ark.cn-beijing.volcengineapi.com"
+VOLC_PAID_HINT = {"glm-5-3-flash-260828", "deepseek-v4-1-flash-260910"}  # 无免费额度的付费模型
+
+
+def _volc_hmac(key, msg):
+    return hmac.new(key, msg, hashlib.sha256).digest()
+
+
+def _volc_api(ak, sk, action, body_dict, timeout=20):
+    # 火山引擎 V4 签名（HMAC-SHA256 Credential 链），与官方 GetCustomModel 示例一致
+    now = datetime.datetime.utcnow()
+    x_date = now.strftime("%Y%m%dT%H%M%SZ")
+    short_date = now.strftime("%Y%m%d")
+    body = json.dumps(body_dict, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    payload_hash = hashlib.sha256(body).hexdigest()
+    canonical_query = "Action=" + action + "&Version=2024-01-01"
+    canonical_headers = ("content-type:application/json\nhost:" + VOLC_API_HOST +
+                         "\nx-content-sha256:" + payload_hash + "\nx-date:" + x_date + "\n")
+    signed_headers = "content-type;host;x-content-sha256;x-date"
+    canonical_request = "\n".join(["POST", "/", canonical_query, canonical_headers,
+                                    signed_headers, payload_hash])
+    creq_hash = hashlib.sha256(canonical_request.encode("utf-8")).hexdigest()
+    k_date = _volc_hmac(sk.encode("utf-8"), short_date.encode("utf-8"))
+    k_region = _volc_hmac(k_date, b"cn-beijing")
+    k_service = _volc_hmac(k_region, b"ark")
+    k_signing = _volc_hmac(k_service, b"request")
+    string_to_sign = "\n".join(["HMAC-SHA256", x_date, short_date + "/cn-beijing/ark/request", creq_hash])
+    signature = hmac.new(k_signing, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
+    cred = ("HMAC-SHA256 Credential=" + ak + "/" + short_date + "/cn-beijing/ark/request, SignedHeaders="
+            + signed_headers + ", Signature=" + signature)
+    req = urllib.request.Request("https://" + VOLC_API_HOST + "/?" + canonical_query,
+                                 data=body, method="POST")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("X-Date", x_date)
+    req.add_header("X-Content-Sha256", payload_hash)
+    req.add_header("Authorization", cred)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8")), None
+    except urllib.error.HTTPError as e:
+        try:
+            detail = e.read().decode("utf-8", errors="replace")[:400]
+        except Exception:
+            detail = str(e)
+        return None, "HTTP " + str(e.code) + " " + detail
+    except Exception as e:
+        return None, str(e)[:300]
+
+
+def is_volc_provider(p):
+    return bool(p) and "volces.com" in str(p.get("base_url") or "")
+
+
+def _volc_provider_models(d):
+    out = []
+    for p in d.get("providers") or []:
+        if is_volc_provider(p):
+            for m in p.get("models") or []:
+                if m not in out:
+                    out.append(m)
+    return out
+
+
+def _volc_foundation_name(m):
+    # 面板模型带日期后缀（doubao-seed-2-1-lite-260915）；GetModelActivation 要的是基础模型名
+    # （官方示例 doubao-seed-1.6 / doubao-seed-2-0-pro），去掉日期后缀即基础名
+    return re.sub(r"-\d{6}$", "", str(m))
+
+
+def volc_quota_view(d):
+    # 面板视图：绝不回传 SecretKey；AccessKey 只回掩码
+    q = d.get("volc_quota") or {}
+    ak = q.get("access_key") or ""
+    return {
+        "configured": bool(ak),
+        "access_key_masked": ((ak[:3] + "..." + ak[-3:]) if len(ak) > 8 else ("已配置" if ak else "")),
+        "synced_at": q.get("synced_at") or "",
+        "models": q.get("models") or {},
+        "last_error": q.get("last_error") or "",
+    }
+
+
+@app.post("/api/volc/keys")
+async def api_volc_keys(req: Request):
+    body = await req.json()
+    ak = str(body.get("access_key") or "").strip()
+    sk = str(body.get("secret_key") or "").strip()
+    if not ak or not sk:
+        return {"ok": False, "error": "AccessKey ID 与 Secret 均必填"}
+    res, err = _volc_api(ak, sk, "ListModelActivations",
+                         {"PageNumber": 1, "PageSize": 100, "WithFreeUsage": True})
+    if err:
+        return {"ok": False, "error": "验证失败：" + err}
+    items = (res or {}).get("Result", {}).get("Items") or []
+    d = load_data()
+    q = d.setdefault("volc_quota", {"access_key": "", "secret_key": "", "synced_at": "", "models": {}})
+    q["access_key"] = ak
+    q["secret_key"] = sk
+    save_data(d)
+    return {"ok": True, "activated": len(items),
+            "names": [it.get("FoundationModelName") for it in items][:50]}
+
+
+@app.post("/api/volc/quota/refresh")
+async def api_volc_quota_refresh(req: Request):
+    d = load_data()
+    q = d.setdefault("volc_quota", {"access_key": "", "secret_key": "", "synced_at": "", "models": {}})
+    ak = q.get("access_key") or ""
+    sk = q.get("secret_key") or ""
+    if not ak or not sk:
+        return {"ok": False, "error": "未配置火山 AccessKey：在面板「火山方舟免费额度」里填写并保存"}
+    models = _volc_provider_models(d)
+    # 先列账号已开通的基础模型，拿真实 FoundationModelName 做匹配，避免瞎猜名字
+    res, err = _volc_api(ak, sk, "ListModelActivations",
+                        {"PageNumber": 1, "PageSize": 100, "WithFreeUsage": True})
+    if err:
+        return {"ok": False, "error": "ListModelActivations 失败：" + err}
+    activations = {}
+    for it in (res or {}).get("Result", {}).get("Items") or []:
+        activations[str(it.get("FoundationModelName") or "")] = it
+    out = {}
+    ok_cnt = 0
+    for m in models:
+        base = _volc_foundation_name(m)
+        item = activations.get(base)
+        if item is None:
+            res2, err2 = _volc_api(ak, sk, "GetModelActivation",
+                                   {"FoundationModelName": base, "WithFreeUsage": True})
+            if err2:
+                out[m] = {"foundation": base, "error": err2}
+                continue
+            item = (res2 or {}).get("Result", {}).get("Item") or {}
+        usage = item.get("InitialInferenceFreeUsage") or {}
+        packs = [p for p in (item.get("FreeResourcePackItems") or [])
+                 if str(p.get("Type")) == "FreeInference"]
+        total = usage.get("Total")
+        consumed = usage.get("Consumed")
+        if total in (None, 0) and packs:
+            total = sum(int(p.get("Total") or 0) for p in packs)
+            consumed = sum(int(p.get("Consumed") or 0) for p in packs)
+        rec = {"foundation": item.get("FoundationModelName") or base,
+               "state": item.get("State") or "",
+               "total": int(total or 0),
+               "consumed": int(consumed or 0)}
+        if rec["total"]:
+            ok_cnt += 1
+        elif m in VOLC_PAID_HINT:
+            rec["paid"] = True
+        out[m] = rec
+    q["models"] = out
+    q["synced_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    q["last_error"] = ""
+    save_data(d)
+    return {"ok": True, "synced": ok_cnt, "total": len(models), "synced_at": q["synced_at"]}
+
+
 @app.get("/api/logs")
 def api_logs(limit: int = 100):
     limit = max(1, min(limit, 500))
     return {"logs": read_logs(limit)}
+
+
+def _pct(sorted_vals, q):
+    """线性插值百分位；空列表返回 None。"""
+    if not sorted_vals:
+        return None
+    if len(sorted_vals) == 1:
+        return int(sorted_vals[0])
+    k = (len(sorted_vals) - 1) * q
+    f = int(k)
+    c = min(f + 1, len(sorted_vals) - 1)
+    if f == c:
+        return int(sorted_vals[f])
+    return int(sorted_vals[f] + (sorted_vals[c] - sorted_vals[f]) * (k - f))
 
 
 @app.get("/api/logs/stats")
@@ -2590,12 +3494,138 @@ def api_log_stats():
           "avg_ms": int(b["lat_sum"] / b["lat_n"]) if b["lat_n"] else None}
          for m, b in by_model.items()),
         key=lambda x: -x["calls"])
+
+    # ---- R51：按渠道号池 / 使用号池归集耗时与用量 ----
+    # 上游耗时不可直接探测——这里统计的是「经 Hub 调用的实测耗时」，按渠道所在号池归集。
+    d = load_data()
+    pools = d.get("pools") or []
+    pool_by_id = {pl.get("id"): pl for pl in pools}
+    prov_by_name = {p.get("name"): p for p in d.get("providers") or []}
+
+    def _new_bucket():
+        return {"calls": 0, "ok": 0, "tokens": 0, "lats": [], "last_ts": "",
+                "providers": {}, "keys": {}}
+
+    def _feed(b, l):
+        b["calls"] += 1
+        if l.get("ok"):
+            b["ok"] += 1
+        b["tokens"] += l.get("total_tokens") or 0
+        ms = l.get("latency_ms")
+        if isinstance(ms, (int, float)) and ms and not l.get("blocked"):
+            b["lats"].append(ms)
+        ts = l.get("ts") or ""
+        if ts > b["last_ts"]:
+            b["last_ts"] = ts
+
+    def _fin(b):
+        sl = sorted(b["lats"])
+        return {"calls": b["calls"], "ok": b["ok"],
+                "ok_rate": round(b["ok"] / b["calls"] * 100, 1) if b["calls"] else None,
+                "avg_ms": int(sum(sl) / len(sl)) if sl else None,
+                "p50_ms": _pct(sl, 0.5), "p95_ms": _pct(sl, 0.95),
+                "max_ms": int(sl[-1]) if sl else None,
+                "tokens": b["tokens"], "last_ts": b["last_ts"]}
+
+    by_cp = {}
+    by_up = {}
+    for l in logs:
+        # 渠道号池归属：provider → provider.pool_id → 池名（池已删 / 渠道已删时降级为原名）
+        pname = l.get("provider")
+        if pname:
+            prov = prov_by_name.get(pname)
+            pid = (prov or {}).get("pool_id") or ""
+            pl = pool_by_id.get(pid) if pid else None
+            ck = pid or ("prov:" + pname)
+            b = by_cp.setdefault(ck, _new_bucket())
+            _feed(b, l)
+            b["providers"][pname] = True
+        # 使用号池归属：日志 pool_id（R51 起记录）；空 = 主 key；无该字段 = 升级前旧日志；
+        # 页面测试不经任何 key，单列一桶，不混进「未标记」
+        if l.get("source") == "test":
+            uk = "panel-test"
+        else:
+            upid = l.get("pool_id")
+            uk = "legacy" if upid is None else (upid or "main")
+        ub = by_up.setdefault(uk, _new_bucket())
+        _feed(ub, l)
+        kn = l.get("key_name")
+        if kn:
+            ub["keys"][kn] = True
+
+    chan_rows = []
+    for ck, b in by_cp.items():
+        pl = pool_by_id.get(ck)
+        if pl:
+            label = pl.get("name") or ck
+            ptype = "channel" if (pl.get("channel_pid") or pl.get("channel_brand")) else "other"
+        elif ck.startswith("prov:"):
+            label = ck[5:]
+            ptype = "deleted"
+        else:
+            label = "（号池已删除）"
+            ptype = "deleted"
+        row = _fin(b)
+        row.update({"pool_id": ck, "label": label, "pool_type": ptype,
+                    "providers": sorted(b["providers"].keys())})
+        chan_rows.append(row)
+    chan_rows.sort(key=lambda x: -x["calls"])
+
+    up_rows = []
+    for uk, b in by_up.items():
+        if uk == "main":
+            label, ptype = "主 key（全池）", "main"
+        elif uk == "panel-test":
+            label, ptype = "页面测试（不经 key）", "test"
+        elif uk == "legacy":
+            label, ptype = "（升级前日志 · 未标记 key）", "legacy"
+        else:
+            pl = pool_by_id.get(uk)
+            if pl:
+                label = pl.get("name") or uk
+                ptype = "channel" if (pl.get("channel_pid") or pl.get("channel_brand")) else "usage"
+            else:
+                label, ptype = "（号池已删除）", "deleted"
+        row = _fin(b)
+        row.update({"pool_id": uk, "label": label, "pool_type": ptype,
+                    "keys": sorted(b["keys"].keys())})
+        up_rows.append(row)
+    up_rows.sort(key=lambda x: -x["calls"])
+
+    # ---- R52：图表序列（按天趋势 / 24 小时分布 / 来源分布），前端 ECharts 直接消费 ----
+    by_day = {}
+    by_hour = [0] * 24
+    by_source = {}
+    for l in logs:
+        ts = l.get("ts") or ""
+        day = ts[:10] if len(ts) >= 10 else "未知日期"
+        db = by_day.setdefault(day, {"calls": 0, "ok": 0, "fail": 0, "blocked": 0, "tokens": 0})
+        db["calls"] += 1
+        if l.get("blocked"):
+            db["blocked"] += 1
+        elif l.get("ok"):
+            db["ok"] += 1
+        else:
+            db["fail"] += 1
+        db["tokens"] += l.get("total_tokens") or 0
+        hh = ts[11:13]
+        if hh.isdigit():
+            by_hour[int(hh)] += 1
+        src = l.get("source") or "proxy"
+        by_source[src] = by_source.get(src, 0) + 1
+    daily = [dict(day=k, **v) for k, v in sorted(by_day.items())]
+
     return {
         "total": total, "ok": ok_n, "blocked": blocked_n,
         "ok_rate": round(ok_n / total * 100, 1) if total else None,
         "avg_ms": int(sum(lats) / len(lats)) if lats else None,
         "tokens_total": tok_total,
         "by_model": models,
+        "by_channel_pool": chan_rows,
+        "by_usage_pool": up_rows,
+        "daily": daily,
+        "by_hour": by_hour,
+        "by_source": by_source,
     }
 
 
@@ -2623,7 +3653,7 @@ DSH_LOG_FILE = BASE_DIR / "logs" / "dsh.log"
 
 _DSH_HUB_BASE = "https://hub.zeroxcore.tech/v1"
 
-# 渠道分组号池（2026-09-21 用户拍板：dsh 模型面板 = Auto + 五大渠道区块，方便管理）。
+# 渠道分组号池（2026-09-21 用户拍板：dsh 模型面板 = Auto + 渠道区块，方便管理）。
 # 每区块一个模型粒度号池，池内模型随渠道勾选/额度自动同步；顺序即 dsh 面板顺序。
 CHANNEL_POOLS = [
     ("pool_ch_deepseek", "DeepSeek 原生", "deepseek01"),
@@ -2631,11 +3661,12 @@ CHANNEL_POOLS = [
     ("pool_ch_copilot", "GitHub Copilot", "83c06be0ee"),
     ("pool_ch_wb", "WorkBuddy", "wb001"),
     ("pool_ch_bailian", "百炼", "bailian001"),
+    ("pool_ch_sensenova", "商汤 SenseNova", "975abae5fa"),
 ]
 
 
 def _ensure_channel_pools(d):
-    """确保五个渠道分组号池存在，并把池内模型同步为渠道当前可对话模型（模型粒度号池）。"""
+    """确保各渠道分组号池存在，并把池内模型同步为渠道当前可对话模型（模型粒度号池）。"""
     pools = d.setdefault("pools", [])
     by_id = {pl.get("id"): pl for pl in pools}
     provs = {p.get("id"): p for p in d.get("providers") or []}
