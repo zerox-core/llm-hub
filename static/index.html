@@ -1759,6 +1759,7 @@ async function startAgAuth(btn){
     toast(r.message || '授权流程已启动，请在浏览器完成 Google 登录');
     btn.textContent = '等待 Google 授权…';
     if(_agPoll) clearInterval(_agPoll);
+    if(r.cloud){ btn.disabled = false; btn.textContent = '我已完成授权'; btn.onclick = function(){ finishAgAuth(btn); }; toast('授权完成后浏览器会跳到 localhost:51121（打不开是正常的）——复制地址栏完整链接，回来点「我已完成授权」粘贴完成登录'); }
     _agPoll = setInterval(pollAgAuth, 3000);
   }catch(e){
     toast('启动授权失败：' + e.message, true);
@@ -1772,6 +1773,7 @@ async function pollAgAuth(){
     if(s.running) return;
     clearInterval(_agPoll); _agPoll = null;
     const btn = _agBtnEl;
+    if(btn){ btn.onclick = function(){ startAgAuth(btn); }; }
     if(btn){ btn.disabled = false; btn.textContent = '授权反重力 Google'; }
     const hr = s.hub_refresh;
     if(s.models_count > 0){
@@ -1784,6 +1786,19 @@ async function pollAgAuth(){
 }
 
 // ---------------- WorkBuddy（腾讯 CodeBuddy）反代登录 ----------------
+async function finishAgAuth(btn){
+  const u = prompt('粘贴 Google 授权后浏览器地址栏里的完整链接（http://localhost:51121/oauth-callback?... 开头）：');
+  if(!u || !u.trim()) return;
+  try{
+    const r = await api('/api/ag/callback', 'POST', {url: u.trim()});
+    toast(r.message || '回调已提交，等待反代确认授权状态…');
+    if(btn){ btn.disabled = true; btn.textContent = '确认授权中…'; }
+    if(!_agPoll) _agPoll = setInterval(pollAgAuth, 3000);
+  }catch(e){
+    toast('提交回调失败：' + e.message, true);
+  }
+}
+
 let _wbPoll = null, _wbBtnEl = null;
 async function startWbAuth(btn){
   btn = btn || document.querySelector('.auth-wb');

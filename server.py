@@ -2085,7 +2085,7 @@ def ag_login_start():
     if HUB_CLOUD:
         """云端：走 cliproxy 管理口拿反重力授权链接，浏览器完成 Google 登录（无需本地 CLI）。"""
         if _ag_login.get("state") and _ag_login.get("cloud_status") == "wait":
-            return {"ok": True, "already": True, "url": _ag_login.get("url"),
+            return {"ok": True, "already": True, "cloud": True, "url": _ag_login.get("url"),
                     "message": "反重力授权已在进行中，请在打开的页面完成 Google 登录"}
         try:
             r = _wb_mgmt_get("/antigravity-auth-url")
@@ -2224,6 +2224,50 @@ def ag_login_status():
             out["models_count"] = ag_models_count()
         out["hub_refresh"] = _ag_refresh_hub_provider()
     return out
+
+
+@app.post("/api/ag/callback")
+async def ag_callback(req: Request):
+    """R63 云端授权回流：Google 授权后浏览器跳 localhost:51121（无人监听属正常），
+    用户把地址栏完整 URL 粘回面板，hub 解析 code/state 转发 cliproxy 管理口闭环。"""
+    try:
+        body = await req.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    raw = str(body.get("url") or "").strip()
+    code = str(body.get("code") or "").strip()
+    state = str(body.get("state") or "").strip()
+    if raw:
+        try:
+            from urllib.parse import urlparse, parse_qs
+            q = parse_qs(urlparse(raw).query)
+            if not code:
+                code = (q.get("code") or [""])[0]
+            if not state:
+                state = (q.get("state") or [""])[0]
+        except Exception:
+            pass
+    if not code or not state:
+        raise HTTPException(400, "链接里没解析到 code/state：请粘贴 Google 授权后浏览器地址栏的完整链接（http://localhost:51121/oauth-callback?... 开头）")
+    if not HUB_CLOUD:
+        return {"ok": False, "message": "本地模式登录流程自带回调，无需粘贴回流"}
+    try:
+        from urllib.parse import quote
+        r = _wb_mgmt_get("/oauth-callback?code=" + quote(code, safe="") + "&state=" + quote(state, safe=""), timeout=20)
+    except HTTPException:
+        raise
+    except Exception as e:
+        return {"ok": False, "message": "转发回调到反代失败：" + str(e)[:200]}
+    st = {}
+    try:
+        st = r.json() if r.status_code == 200 else {"http": r.status_code, "text": r.text[:200]}
+    except Exception:
+        st = {"http": r.status_code}
+    if r.status_code == 200:
+        return {"ok": True, "mgmt": st, "message": "回调已提交反代，等待授权状态确认"}
+    return {"ok": False, "mgmt": st, "message": "反代回调接口返回异常：" + str(r.status_code)}
 
 
 # ---------------- WorkBuddy（腾讯 CodeBuddy）反代授权 ----------------
