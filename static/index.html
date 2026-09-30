@@ -722,7 +722,7 @@ function renderProvider(p, forceOpen){
     '</div>' +
     blockBox +
     (isAg ? renderAgQuota(p) : (isWb ? renderWbQuota(p) : (isCopilot ? renderCopilotQuota(p) : ''))) +
-    (viewModels.length ? '<div class="order-hint">勾选 = 模型进入可调列表（auto 轮询与 Harness 单选都只用已勾选模型）；轮询按下列顺序进行（↑↓ 调整）。</div>' : '') +
+    (viewModels.length ? '<div class="order-hint">勾选 = 模型进入可调列表（auto 轮询与 Harness 单选都只用已勾选模型）；轮询按下列顺序进行（↑↓ 调整）；拖动一行到另一行（或组头行）= 合并为一个调用名（组内按序轮询 + 故障转移，组头可整组拆开）。</div>' : '') +
     fetchErr +
     (viewModels.length ? catHtml :
       (freeOnly ? '<div class="empty">当前过滤下没有模型（已勾选「只看有免费额度」）</div>'
