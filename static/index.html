@@ -8,10 +8,23 @@
 <style>
 /* 合并组（2026-09-30）*/
 tr.grp-head > td{background:rgba(47,93,223,.06);border-top:2px solid rgba(47,93,223,.35);border-bottom:2px solid rgba(47,93,223,.35);font-weight:600;}
-tr.grp-head .gm-chip{display:inline-block;margin:0 3px;padding:1px 8px;border:1px solid rgba(47,93,223,.35);border-radius:10px;background:#fff;font-weight:400;}
+tr.grp-head .gm-chip{display:inline-block;margin:0 3px;padding:1px 8px;border:1px solid rgba(47,93,223,.55);border-radius:10px;background:rgba(47,93,223,.25);color:#c8d6ff;font-weight:400;}
 tr.grp-head .q-num{font-weight:400;}
 tr.grp-head.grp-over > td, tr.mrow.grp-over > td{outline:2px dashed #2f5ddf;outline-offset:-3px;}
 tr.mrow[draggable="true"]{cursor:grab;}
+tr.msub{cursor:grab;}
+tr.msub.grp-over > td{outline:2px dashed #2f5ddf;outline-offset:-3px;background:rgba(47,93,223,.05);}
+.gm-ord{display:inline-block;min-width:16px;text-align:center;background:rgba(47,93,223,.22);border-radius:5px;color:#9db8ff;font-size:10px;font-weight:700;margin-right:4px;padding:0 3px;}
+/* 上游页厂商卡 */
+.vc-card{background:var(--card,#fff);border:1px solid var(--line,#e6e9f0);border-radius:12px;padding:13px 15px;cursor:pointer;transition:all .12s;}
+.vc-card:hover{border-color:#3d64e0;transform:translateY(-1px);}
+.vc-brand{font-size:13px;font-weight:800;margin-bottom:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+.vc-ch{font-size:12px;color:var(--text,#222);padding:5px 6px;display:flex;justify-content:space-between;gap:8px;border-top:1px solid var(--line,#eef1f6);cursor:pointer;align-items:center;}
+.vc-ch:hover{background:rgba(47,93,223,.05);}
+.vc-ch .vc-meta{color:var(--sub,#8a93a6);font-size:11px;white-space:nowrap;}
+.vc-go{margin-top:10px;font-size:11px;color:#7aa0f8;font-weight:700;}
+/* 引导卡 */
+.guide-card{border:1px dashed rgba(47,93,223,.45)!important;border-radius:10px;padding:12px 14px!important;margin:12px 0;font-size:12.5px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
 </style>
 </head>
 <body>
@@ -19,7 +32,9 @@ tr.mrow[draggable="true"]{cursor:grab;}
   <div class="side-brand side-brand-row">LLM Key Hub<button class="side-toggle" data-side-toggle title="收起侧栏">«</button><small>本地大模型钥匙管理</small></div>
   <nav class="side-nav">
     <a href="/harness"><span class="ico">◆</span>DeepSeek Harness</a>
-    <a href="/" class="on" id="navOverview" onclick="backToOverview();return false"><span class="ico">▦</span>渠道总览</a>
+    <a href="#" id="navUpstream" onclick="goPage('upstream');return false"><span class="ico">⬆</span>上游渠道</a>
+    <a href="#" class="on" id="navPools" onclick="goPage('pools');return false"><span class="ico">▦</span>渠道号池</a>
+    <a href="#" id="navUsepools" onclick="goPage('usepools');return false"><span class="ico">◈</span>使用号池</a>
     <div id="sideProviders" class="side-prov"></div>
     <a href="/monitor"><span class="ico">≡</span>调用监控</a>
   </nav>
@@ -75,27 +90,10 @@ tr.mrow[draggable="true"]{cursor:grab;}
   </div>
 
   <div id="overviewSec">
-    <div class="tile-row" id="tiles"></div>
-
-    <div class="sec-title"><span>① 上游渠道（自建渠道 · 每个渠道一个账号 / 反代，可扩充删除；点卡片进详情管模型）</span></div>
+    <div id="pageUpstream" class="page" style="display:none;">
+    <div class="sec-title"><span>上游渠道 · 按厂商分类（每个渠道一个账号 / 反代；点厂商卡进对应渠道号池做调用分发管理，点渠道行进账号设置）</span></div>
     <div class="panel-grid" id="panels"></div>
 
-    <div class="sec-title" style="display:flex;align-items:center;gap:10px">
-      <span>② 渠道号池（与上游品牌一一对应 · 添加渠道自动归并、新品牌自动建池 · 这层是我们自己的 URL + 池 key，可直接调用）</span>
-    </div>
-    <div class="card pool-panel" id="chanPoolPanel"></div>
-
-    <div class="sec-title" style="display:flex;align-items:center;gap:10px">
-      <span>③ 使用池（按自建需求从渠道号池勾选模型组合 · 跨品牌自动调度 · 每池专属 key，场景分发用它）</span>
-      <button class="small" onclick="openPoolPicker(null)">+ 新建使用池</button>
-    </div>
-    <div class="card pool-panel" id="usePoolPanel"></div>
-
-    <div class="sec-title" style="display:flex;align-items:center;gap:10px">
-      <span>④ 分发 key 与用量（子 key 挂在池下 · 按 key 限量与监控；任一 key + 固定地址即可调 /v1）</span>
-      <button class="small only-local" onclick="syncDsh()">同步到 dsh</button>
-    </div>
-    <div class="card pool-panel" id="accessPanel"></div>
     <details class="raw"><summary>调用配置（Hub 入口 + 各渠道直连地址，调试用）</summary>
       <div class="card cfg-panel" id="cfgPanel"></div>
     </details>
@@ -106,6 +104,30 @@ tr.mrow[draggable="true"]{cursor:grab;}
       <details class="raw"><summary>查看原始返回（调试用）</summary><pre id="quotaRaw">（无）</pre></details>
     </div>
     </details>
+    </div><!-- /pageUpstream -->
+
+    <div id="pagePools" class="page">
+    <div class="tile-row" id="tiles"></div>
+
+    <div class="sec-title" style="display:flex;align-items:center;gap:10px">
+      <span>渠道号池 · 主要调用分发中枢（与上游品牌一一对应 · 添加渠道自动归并、新品牌自动建池 · 模型启停 / 排序 / 合并组都在这里管）</span>
+    </div>
+    <div class="card pool-panel" id="chanPoolPanel"></div>
+    </div><!-- /pagePools -->
+
+    <div id="pageUsepools" class="page" style="display:none;">
+    <div class="sec-title" style="display:flex;align-items:center;gap:10px">
+      <span>使用池（特殊场景组合 · 从渠道号池勾选模型 · 跨品牌自动调度 · 每池专属 key）</span>
+      <button class="small" onclick="openPoolPicker(null)">+ 新建使用池</button>
+    </div>
+    <div class="card pool-panel" id="usePoolPanel"></div>
+
+    <div class="sec-title" style="display:flex;align-items:center;gap:10px">
+      <span>分发 key 与用量（子 key 挂在池下 · 按 key 限量与监控；任一 key + 固定地址即可调 /v1）</span>
+      <button class="small only-local" onclick="syncDsh()">同步到 dsh</button>
+    </div>
+    <div class="card pool-panel" id="accessPanel"></div>
+    </div><!-- /pageUsepools -->
   </div>
   <div id="detailSec" style="display:none"></div>
 </div>
@@ -398,6 +420,32 @@ async function mDropOnModel(ev, pid, target){
   toast('已创建合并组「'+name+'」：调它即按序轮询 '+a+' → '+target);
   await load();
 }
+async function mDropOnMember(ev, pid, target, gname){
+  ev.preventDefault();
+  document.querySelectorAll('.grp-over').forEach(x => x.classList.remove('grp-over'));
+  if(!_dragM || _dragM.pid !== pid || !_dragM.model || _dragM.model === target) return;
+  const m = _dragM.model;
+  const p = STATE.providers.find(x => x.id === pid);
+  if(!p) return;
+  const g = (p.model_groups||[]).find(x => x.name === gname);
+  if(!g) return;
+  const g0 = groupOfModel(p, m);
+  _dragM = null;
+  try{
+    if(!g0 || g0.name !== gname){
+      const r0 = await api('/api/providers/'+pid+'/models/merge', 'POST', {model: m, group: gname});
+      if(!r0.ok){ toast('并入失败：'+(r0.error||r0.detail||''), true); return; }
+      toast('已把「'+m+'」并入「'+gname+'」（排到组尾，可再拖动微调顺序）');
+      await load(); return;
+    }
+    const members = (g.members||[]).filter(x => x !== m);
+    const ti = members.indexOf(target);
+    members.splice(ti < 0 ? members.length : ti, 0, m);
+    const r = await api('/api/providers/'+pid+'/models/group_order', 'POST', {group: gname, members: members});
+    if(r.ok){ toast('组「'+gname+'」调用顺序：'+members.join(' → ')); await load(); }
+    else toast('排序失败：'+(r.error||r.detail||''), true);
+  }catch(e){ toast('操作失败：'+e.message, true); }
+}
 async function unmergeGroup(pid, gname, single){
   const label = single ? ('把「'+single+'」移出合并组「'+gname+'」？')
                        : ('解散合并组「'+gname+'」？（成员保留在列表中，恢复独立显示与调用）');
@@ -437,7 +485,7 @@ function groupHeadRow(p, g){
   return '<tr class="grp-head" id="'+esc(gid)+'" ' +
     'ondragover="mDragOver(event,\''+esc(gid)+'\')" ondragleave="mDragLeave(event,\''+esc(gid)+'\')" ' +
     'ondrop="mDropOnGroup(event,\''+p.id+'\',\''+esc(g.name)+'\')" ' +
-    'title="把未入组的模型拖到本行 = 并入组「'+esc(g.name)+'」；调用组名时按 chip 顺序轮询、失败自动切换">' +
+    'title="把未入组的模型拖到本行 = 并入组「'+esc(g.name)+'」；组内成员互拖 = 调整调用顺序；调用组名时按成员顺序轮询、失败自动切换">' +
     '<td colspan="6">' +
     '<span class="chip blue">合并组</span> <b>'+esc(g.name)+'</b> '+chips+' ' +
     '<span class="q-num">拖模型到此行并入 · 调本名即按序轮询</span>' +
@@ -445,12 +493,15 @@ function groupHeadRow(p, g){
     '<button class="small danger" onclick="unmergeGroup(\''+p.id+'\',\''+esc(g.name)+'\',\'\')">拆组</button>' +
     '</td></tr>';
 }
-function groupMemberRow(p, m, g, isBailian){
+function groupMemberRow(p, m, g, isBailian, idx){
   const rowId = 'r-' + p.id + '-sub-' + m;
   return '<tr class="msub" id="'+esc(rowId)+'" draggable="true" ' +
-    'ondragstart="mDragStart(event,\''+p.id+'\',\''+esc(m)+'\')" ondragend="mDragEnd(event)">' +
+    'ondragstart="mDragStart(event,\''+p.id+'\',\''+esc(m)+'\')" ondragend="mDragEnd(event)" ' +
+    'ondragover="mDragOver(event,\''+esc(rowId)+'\')" ondragleave="mDragLeave(event,\''+esc(rowId)+'\')" ' +
+    'ondrop="mDropOnMember(event,\''+p.id+'\',\''+esc(m)+'\',\''+esc(g.name)+'\')" ' +
+    'title="组成员：拖其他模型到本行上 = 并入组并排到本行之前；组内互拖 = 调整组内调用顺序">' +
     '<td style="width:3%"></td>' +
-    '<td class="model-id" style="padding-left:26px">↳ '+esc(m)+' <span class="chip" title="合并组成员：下游 /v1/models 不单列，经组名 '+esc(g.name)+' 轮询调用">∈ '+esc(g.name)+'</span></td>' +
+    '<td class="model-id" style="padding-left:26px"><span class="gm-ord">'+(idx===undefined?'·':(idx+1))+'</span>'+esc(m)+' <span class="chip" title="合并组成员：下游 /v1/models 不单列，经组名 '+esc(g.name)+' 按序轮询调用">∈ '+esc(g.name)+'</span></td>' +
     '<td>'+quotaCell(m, isBailian, p)+'</td>' +
     '<td>'+testCell(p, m)+'</td>' +
     '<td></td>' +
@@ -587,7 +638,8 @@ async function syncCopilotQuota(){
   await load();
 }
 
-function renderProvider(p, forceOpen){
+function renderProvider(p, forceOpen, withModels){
+  if(withModels === undefined) withModels = true;
   const collapsed = !forceOpen && isCollapsed(p.id);
   const isBailian = p.type === 'bailian';
   const isAg = isAgProvider(p);
@@ -624,16 +676,18 @@ function renderProvider(p, forceOpen){
     if(ia<0) ia = CAT_ORDER.length-1; if(ib<0) ib = CAT_ORDER.length-1;
     return ia - ib;
   });
-  const catHtml = cats.map(c => {
+  const doneG = {};
+  const catHtml = (withModels ? cats.map(c => {
     const catId = 'cat-' + p.id + '-' + c;
     const grpHidden = hiddenByGroup(p);
-    const doneG = {};
     const rowArr = [];
     for(const m of groups[c]){
       const g = groupOfModel(p, m);
       if(g){
-        if(!doneG[g.name]){ doneG[g.name] = 1; rowArr.push(groupHeadRow(p, g)); }
-        rowArr.push(groupMemberRow(p, m, g, isBailian));
+        if(doneG[g.name]) continue;
+        doneG[g.name] = 1;
+        rowArr.push(groupHeadRow(p, g));
+        (g.members||[]).forEach(function(gm, gi){ rowArr.push(groupMemberRow(p, gm, g, isBailian, gi)); });
         continue;
       }
       const cur = p.active_model === m;
@@ -672,7 +726,7 @@ function renderProvider(p, forceOpen){
       '<button class="tiny" title="取消勾选本分类全部模型（退出可调列表）" onclick="bulkEnableCat(\''+p.id+'\',\''+esc(c)+'\',false)">全不选</button>' +
       '</span></summary>' +
       '<table><thead><tr><th style="width:3%"></th><th style="width:29%">模型</th><th style="width:28%">免费额度</th><th style="width:10%">连通性</th><th style="width:6%">排序</th><th>操作</th></tr></thead><tbody>'+rows+'</tbody></table></details>';
-  }).join('');
+  }).join('') : '');;
 
   const fetchErr = p.fetch_error ? '<div class="quota-line" style="color:var(--bad)">'+esc(p.fetch_error)+'</div>' : '';
   const wbHint = isWb ? '<div class="quota-line">' + (wbst.logged_in
@@ -722,21 +776,23 @@ function renderProvider(p, forceOpen){
     '</div>' +
     blockBox +
     (isAg ? renderAgQuota(p) : (isWb ? renderWbQuota(p) : (isCopilot ? renderCopilotQuota(p) : ''))) +
-    (viewModels.length ? '<div class="order-hint">勾选 = 模型进入可调列表（auto 轮询与 Harness 单选都只用已勾选模型）；轮询按下列顺序进行（↑↓ 调整）；拖动一行到另一行（或组头行）= 合并为一个调用名（组内按序轮询 + 故障转移，组头可整组拆开）。</div>' : '') +
+    (withModels && viewModels.length ? '<div class="order-hint">勾选 = 模型进入可调列表（auto 轮询与 Harness 单选都只用已勾选模型）；轮询按下列顺序进行（↑↓ 调整）；拖动一行到另一行（或组头行）= 合并为一个调用名；合并组成员紧挨组头排列，拖到组成员行上 = 调整组内调用顺序。</div>' : '') +
     fetchErr +
-    (viewModels.length ? catHtml :
-      (freeOnly ? '<div class="empty">当前过滤下没有模型（已勾选「只看有免费额度」）</div>'
-                : '<div class="empty">暂无模型，点「刷新模型列表」拉取</div>')) +
+    (withModels && viewModels.length ? catHtml :
+      (withModels ? (freeOnly ? '<div class="empty">当前过滤下没有模型（已勾选「只看有免费额度」）</div>'
+                : '<div class="empty">暂无模型，点「刷新模型列表」拉取</div>') : '')) +
   '</div>';
 }
 
 
 // ---------------- 视图切换（总览 / 单渠道管理） ----------------
-let VIEW = {name:'overview', pid:null};
-try{ const _v = JSON.parse(sessionStorage.getItem('hub_view')||'null'); if(_v && _v.name) VIEW = _v; }catch(e){}
+let VIEW = {name:'pools', pid:null};
+try{ const _v = JSON.parse(sessionStorage.getItem('hub_view')||'null'); if(_v && _v.name){ if(_v.name === 'overview') _v.name = 'pools'; VIEW = _v; } }catch(e){}
 function saveView(){ try{ sessionStorage.setItem('hub_view', JSON.stringify(VIEW)); }catch(e){} }
+function navActive(id){ ['navUpstream','navPools','navUsepools'].forEach(x=>{ const el=document.getElementById(x); if(el) el.className = (x===id?'on':''); }); }
+function goPage(name){ VIEW = {name:name, pid:null}; saveView(); render(); window.scrollTo(0,0); }
 function openProvider(pid){ VIEW = {name:'detail', pid:pid}; saveView(); render(); window.scrollTo(0,0); }
-function backToOverview(){ VIEW = {name:'overview', pid:null}; saveView(); render(); }
+function backToOverview(){ goPage('pools'); }
 
 // ---------------- 调用地址开关（本机/局域网 ↔ 公网） ----------------
 // 只重写 127.0.0.1 / localhost 的主机名；远程 API 地址（如百炼）原样透传
@@ -831,15 +887,14 @@ function renderSide(){
     for(const pl of chanPools){
       const provs = ps.filter(p => (pl.providers||[]).includes(p.id));
       if(!provs.length) continue;
-      html += '<div style="'+grpStyle+'">◆ '+esc(pl.name)+'</div>' + provs.map(item).join('');
+      html += '<div style="'+grpStyle+';cursor:pointer" title="进入 '+esc(pl.name)+' 号池管理" onclick="openChanPoolDetail(\''+pl.id+'\')">◆ '+esc(pl.name)+' ›</div>' + provs.map(item).join('');
       provs.forEach(p => grouped.add(p.id));
     }
     const rest = ps.filter(p => !grouped.has(p.id));
     if(rest.length) html += (html ? '<div style="'+grpStyle+'">未归组</div>' : '') + rest.map(item).join('');
     sp.innerHTML = html;
   }
-  const no = $('#navOverview');
-  if(no) no.className = VIEW.name==='overview' ? 'on' : '';
+  navActive(VIEW.name==='upstream' ? 'navUpstream' : VIEW.name==='usepools' ? 'navUsepools' : (VIEW.name==='detail' ? 'navUpstream' : 'navPools'));
   const sf = $('#sideFoot');
   if(sf){
     let t = STATE.public_base ? ('接入地址 '+esc(STATE.public_base)) : '本机 http://127.0.0.1:8787';
@@ -895,7 +950,7 @@ function renderTiles(){
   const t = $('#tiles');
   if(!t) return;
   const ps = STATE.providers || [];
-  let h = '<div class="tile" onclick="backToOverview()"><div class="t-ico">▦</div><div><div class="t-name">渠道总数</div><div class="t-num">'+ps.length+'<span class="t-sub"> 个渠道</span></div></div></div>';
+  let h = '<div class="tile" onclick="goPage(\'upstream\')" title="前往上游渠道页"><div class="t-ico">▦</div><div><div class="t-name">渠道总数</div><div class="t-num">'+ps.length+'<span class="t-sub"> 个渠道</span></div></div></div>';
   ps.forEach(p => {
     h += '<div class="tile" onclick="openProvider(\''+p.id+'\')"><div class="t-ico">'+provIcon(p)+'</div><div><div class="t-name">'+esc(p.name)+'</div><div class="t-num">'+enabledCount(p)+'<span class="t-sub"> / '+pvModels(p).length+' 模型</span></div></div></div>';
   });
@@ -941,25 +996,39 @@ function renderPanels(){
   const g = $('#panels');
   if(!g) return;
   const ps = STATE.providers || [];
-  if(!ps.length){ g.innerHTML = '<div class="card" style="padding:22px;color:var(--sub)">还没有渠道，点右上角「+ 添加渠道」创建第一个。</div>'; return; }
-  const wbst = STATE.wb_status || {};
-  g.innerHTML = ps.map(p => {
-    const rawUrl = p.base_url || '';
-    return '<div class="pv">' +
-      '<div class="pv-head"><span class="pv-ico">'+provIcon(p)+'</span><span class="pv-name">'+esc(p.name)+'</span><span class="chip">'+provKindName(p)+'</span>' +
-      (isWbProvider(p) ? (wbst.logged_in ? '<span class="chip ok">WB 已登录</span>' : '<span class="chip bad">WB 未登录</span>') : '') +
-      (p.use_egress ? '<span class="chip">出海代理</span>' : '') +
-      (p.allow_paid ? '<span class="chip warn">允许付费</span>' : '') +
-      '</div>' +
-      '<div class="pv-line">当前模型 <b>'+esc(p.active_model||'未选择')+'</b></div>' +
-      '<div class="pv-line">已勾选 <b>'+enabledCount(p)+' / '+pvModels(p).length+'</b>'+provQuotaLine(p)+'</div>' +
-      '<div class="pv-line">URL <code>'+esc(rawUrl)+'</code><button class="small" onclick="cp(\''+esc(rawUrl)+'\')">复制</button></div>' +
-      '<div class="pv-line">Key <code>'+esc(maskKey(p.api_key))+'</code><button class="small" onclick="cp(\''+esc(p.api_key||'')+'\')">复制</button></div>' +
-      oauthLine(p) +
-      authBoxHtml(p, false) +
-      '<div class="pv-foot"><button class="pv-go" onclick="openProvider(\''+p.id+'\')">进入管理 ›</button></div>' +
-      '</div>';
-  }).join('');
+  if(!ps.length){ g.innerHTML = '<div class="card" style="padding:22px;color:var(--sub)">还没有渠道，点右上角「+ 添加渠道」创建第一个（保存后自动按品牌归并 / 创建渠道号池）。</div>'; return; }
+  const chanPools = (STATE.pools||[]).filter(isChanPool);
+  let h = '';
+  const grouped = new Set();
+  for(const pl of chanPools){
+    const provs = ps.filter(p => (pl.providers||[]).includes(p.id));
+    provs.forEach(p => grouped.add(p.id));
+    h += '<div class="vc-card" title="进入「'+esc(pl.name)+'」号池管理" onclick="openChanPoolDetail(\''+pl.id+'\')">'
+       + '<div class="vc-brand">◆ '+esc(pl.name)
+       + '<span class="chip">'+provs.length+' 渠道</span>'
+       + ((pl.models||[]).length ? '<span class="chip">'+pl.models.length+' 池模型</span>' : '<span class="chip">池成员跟随上游</span>')
+       + '</div>';
+    for(const p of provs){
+      h += '<div class="vc-ch" onclick="event.stopPropagation();openProvider(\''+p.id+'\')" title="进入该渠道账号设置">'
+         + '<span>'+provIcon(p)+' '+esc(p.name)+' <span class="vc-meta">'+esc(provKindName(p))+'</span></span>'
+         + '<span class="vc-meta">'+enabledCount(p)+' / '+pvModels(p).length+' 模型 '+loginChip(p)+'</span>'
+         + '</div>';
+    }
+    h += '<div class="vc-go">进入号池管理（模型启停 / 排序 / 合并组）›</div></div>';
+  }
+  const rest = ps.filter(p => !grouped.has(p.id));
+  if(rest.length){
+    h += '<div class="vc-card">'
+       + '<div class="vc-brand">◇ 未归组渠道<span class="chip">'+rest.length+'</span></div>';
+    for(const p of rest){
+      h += '<div class="vc-ch" onclick="openProvider(\''+p.id+'\')">'
+         + '<span>'+provIcon(p)+' '+esc(p.name)+' <span class="vc-meta">'+esc(provKindName(p))+'</span></span>'
+         + '<span class="vc-meta">'+enabledCount(p)+' / '+pvModels(p).length+' 模型</span>'
+         + '</div>';
+    }
+    h += '</div>';
+  }
+  g.innerHTML = h;
 }
 
 // ---------------- 总览：②渠道号池 / ③使用池 / ④分发 key ----------------
@@ -1016,10 +1085,12 @@ function renderChanPools(){
     const provs = ps.filter(p => (pl.providers||[]).includes(p.id));
     const provChips = provs.map(p => '<span class="pill">'+esc(p.name)+' '+loginChip(p)+'</span>').join('') || '<span class="cell-muted">（空）</span>';
     const mcnt = (pl.models||[]).length;
+    const gcnt = provs.reduce((a,x)=>a+((x.model_groups||[]).length),0);
     h += '<div class="pp-pool">'
        + '<div class="pp-row"><span class="pp-name">◆ '+esc(pl.name)+'</span>'
        + '<span class="chip">'+provs.length+' 账号</span>'
        + (mcnt ? '<span class="chip">'+mcnt+' 模型</span>' : '')
+       + (gcnt ? '<span class="chip">'+gcnt+' 合并组</span>' : '')
        + '</div>'
        + '<div class="pp-row"><span class="pp-name">URL</span><code class="pp-key">'+esc(eu)+'</code><button class="small" onclick="cp(\''+esc(eu)+'\')">复制</button>'
        + '<span class="pp-name">key</span><code class="pp-key">'+esc(maskKey(pl.key))+'</code>'
@@ -1027,7 +1098,7 @@ function renderChanPools(){
        + '<button class="small" onclick="resetPoolKey(\''+pl.id+'\')">重置key</button></div>'
        + '<div class="pp-sub">渠道：'+provChips+' · 池内 auto 轮询</div>'
        + '<div class="pp-ops">'
-       + '<a href="#" onclick="openChanPoolDetail(\''+pl.id+'\');return false">详情</a>'
+       + '<a href="#" onclick="openChanPoolDetail(\''+pl.id+'\');return false">管理调用分发 ›</a>'
        + '<a href="#" onclick="openPoolPicker(null,\''+pl.id+'\');return false">＋ 从这里建使用池</a>'
        + '<a href="#" onclick="renamePool(\''+pl.id+'\',\''+esc(pl.name)+'\');return false">改名</a>'
        + '</div></div>';
@@ -1066,20 +1137,31 @@ function renderChanPoolDetail(){
   const provs = chanPoolProviders(pl);
   const dynamic = !(pl.models||[]).length;
   const members = new Set(chanPoolEffectiveMembers(pl));
-  let h = '<div class="back-row"><button onclick="backToOverview()">‹ 返回总览</button>'
+  const eu = effUrl(STATE.hub_base || 'http://127.0.0.1:8787/v1');
+  let h = '<div class="back-row"><button onclick="goPage(\'pools\')">‹ 返回号池列表</button>'
         + '<span style="font-size:17px;font-weight:700">◆ '+esc(pl.name)+'</span>'
-        + '<span class="q-num">渠道号池与上游品牌一一对应，成员只能从这里绑定的渠道中加入/移除'+(dynamic ? ' · 当前「跟随上游自动」' : '')+'</span></div>';
-  if(dynamic){
-    h += '<div class="pp-sub" style="padding:8px 2px">当前为「跟随上游自动」：池内成员 = 所绑渠道已勾选的可对话模型。点过「加入 / 移除」后会固化为显式名单，之后上游变化不再自动跟随。</div>';
+        + '<span class="chip">'+provs.length+' 渠道</span>'
+        + '<span class="q-num">调用分发中枢 · 模型启停 / 排序 / 合并组 / 池成员都在这里管理'+(dynamic ? ' · 池成员当前「跟随上游自动」' : '')+'</span></div>'
+       + '<div class="card" style="margin:10px 0;padding:12px 14px">'
+       + '<div class="pp-row"><span class="pp-name">URL</span><code class="pp-key">'+esc(eu)+'</code><button class="small" onclick="cp(\''+esc(eu)+'\')">复制</button>'
+       + '<span class="pp-name">key</span><code class="pp-key">'+esc(maskKey(pl.key))+'</code>'
+       + '<button class="small" onclick="cp(\''+esc(pl.key||'')+'\')">复制</button>'
+       + '<button class="small" onclick="resetPoolKey(\''+pl.id+'\')">重置key</button></div>'
+       + '<div class="pp-ops">'
+       + '<a href="#" onclick="renamePool(\''+pl.id+'\',\''+esc(pl.name)+'\');return false">改名</a>'
+       + '<a href="#" onclick="openPoolPicker(null,\''+pl.id+'\');return false">＋ 从这里建使用池</a>'
+       + '</div></div>';
+  if(!provs.length){
+    h += '<div class="card" style="padding:16px;color:var(--sub)">这个号池还没有绑定渠道——到「上游渠道」页添加渠道，保存后自动按品牌归并到对应号池。</div>';
   }
   for(const p of provs){
+    h += renderProvider(p, true);
     const ms = orderedModels(p);
     const disabled = new Set(p.disabled_models||[]);
-    h += '<div class="card" style="margin:10px 0;padding:12px">'
-       + '<div class="pp-row"><span class="pp-name">'+provIcon(p)+' '+esc(p.name)+'</span>'
-       + '<span class="chip">'+ms.length+' 模型（上游）</span></div>';
+    h += '<details class="cat" style="margin:-8px 0 16px"><summary>池成员加入 / 移除'+(dynamic?'（当前跟随上游自动）':'（显式名单）')+'<span class="cnt">'+ms.length+' 模型（上游）</span></summary>'
+       + '<div class="card" style="padding:10px 12px">';
     if(!ms.length){
-      h += '<div class="q-num" style="padding:6px 2px">该渠道暂无模型，请到渠道管理里刷新。</div>';
+      h += '<div class="q-num" style="padding:6px 2px">该渠道暂无模型，请在上方渠道卡里点「刷新模型列表」。</div>';
     }
     for(const m of ms){
       const key = p.id + '::' + m;
@@ -1096,7 +1178,7 @@ function renderChanPoolDetail(){
              : '<button class="small" onclick="chanPoolAdd(\''+pl.id+'\',\''+esc(key)+'\')">加入</button>')
          + '</div>';
     }
-    h += '</div>';
+    h += '</div></details>';
   }
   $('#detailSec').innerHTML = h;
 }
@@ -1326,11 +1408,14 @@ async function savePoolModels(){
 function renderDetail(){
   const p = (STATE.providers || []).find(x => x.id === VIEW.pid);
   if(!p){ backToOverview(); return; }
+  const _pl = (STATE.pools||[]).find(x => isChanPool(x) && (x.providers||[]).includes(p.id));
   $('#detailSec').innerHTML =
-    '<div class="back-row"><button onclick="backToOverview()">‹ 返回总览</button>' +
+    '<div class="back-row"><button onclick="goPage(\'pools\')">‹ 返回号池列表</button>' +
     '<span style="font-size:17px;font-weight:700">'+provIcon(p)+' '+esc(p.name)+'</span>' +
-    '<span class="q-num">单独管理该渠道下的模型（勾选 / 排序 / 测试 / 设为当前）</span></div>' +
-    renderProvider(p, true);
+    '<span class="q-num">上游渠道 · 账号设置（模型启停 / 排序 / 合并组已统一收编到渠道号池管理）</span></div>' +
+    renderProvider(p, true, false) +
+    (_pl ? '<div class="card guide-card">该渠道的调用分发（模型启停 / 排序 / 合并组）统一在渠道号池「'+esc(_pl.name)+'」管理。' +
+      '<button class="small primary" onclick="openChanPoolDetail(\''+_pl.id+'\')">前往号池管理 ›</button></div>' : '');
 }
 
 function render(){
@@ -1346,6 +1431,11 @@ function render(){
   } else if(isChanPoolView){
     renderChanPoolDetail();
   } else {
+    const pg = VIEW.name || 'pools';
+    const _pu = $('#pageUpstream'), _pp = $('#pagePools'), _ps = $('#pageUsepools');
+    if(_pu) _pu.style.display = pg==='upstream' ? '' : 'none';
+    if(_pp) _pp.style.display = pg==='pools' ? '' : 'none';
+    if(_ps) _ps.style.display = pg==='usepools' ? '' : 'none';
     renderTiles();
     renderPanels();
     renderChanPools();

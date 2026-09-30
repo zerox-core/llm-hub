@@ -1222,6 +1222,11 @@ class GroupNameIn(BaseModel):
     model: str = ""                # 传入时：只把该成员移出组；否则解散整组
 
 
+class GroupOrderIn(BaseModel):
+    group: str
+    members: list = []            # 组内成员的新顺序（须与现有成员集合一致）
+
+
 class FreetierIn(BaseModel):
     mode: str = "on"              # on | off
 
@@ -1499,6 +1504,29 @@ def unmerge_group(pid: str, inp: GroupNameIn):
         p.pop("model_groups", None)
     save_data(d)
     return {"ok": True}
+
+
+@app.post("/api/providers/{pid}/models/group_order")
+def group_order(pid: str, inp: GroupOrderIn):
+    """重排合并组内成员顺序；members 必须与组内现有成员集合完全一致（仅顺序不同）。"""
+    d, p = get_provider(pid)
+    gname = str(inp.group or "").strip()
+    if not gname:
+        raise HTTPException(400, "请提供合并组名")
+    tg = None
+    for g in (p.get("model_groups") or []):
+        if g.get("name") == gname:
+            tg = g
+            break
+    if tg is None:
+        raise HTTPException(404, "合并组不存在：%s" % gname)
+    old = tg.get("members") or []
+    new = [str(x or "").strip() for x in (inp.members or []) if str(x or "").strip()]
+    if sorted(new) != sorted(old):
+        raise HTTPException(400, "成员列表与组内现有成员不一致")
+    tg["members"] = new
+    save_data(d)
+    return {"ok": True, "group": tg}
 
 
 @app.put("/api/providers/{pid}/active")
