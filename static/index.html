@@ -1350,11 +1350,20 @@ function openPoolPicker(poolId, chanPoolId){
   for(const p of provList){
     const ms = orderedModels(p);
     if(!ms.length) continue;
+    // R67：组合为最小选择单位——已入组成员不再单独列出/勾选
+    const grps = (p.model_groups||[]).filter(g => (g.members||[]).length >= 2);
+    const gset = new Set();
+    for(const g of grps){ for(const m of (g.members||[])) gset.add(m); }
+    for(const g of grps){   // 历史遗留的成员单独勾选自动升级为整组引用
+      let hit = false;
+      for(const m of (g.members||[])){ if(PICK.sel.delete(p.id+'::'+m)) hit = true; }
+      if(hit) PICK.sel.add(p.id+'::#'+g.name);
+    }
+    const vis = ms.filter(m => !gset.has(m));
     h += '<div class="mpm-group">'
-       + '<div class="mpm-prov">'+esc(p.name)+' <span class="chip">'+ms.length+'</span>'
+       + '<div class="mpm-prov">'+esc(p.name)+' <span class="chip">'+vis.length+'</span>'
        + ' <a href="#" style="margin-left:8px" title="勾选本渠道全部可用模型" onclick="mpmSetProv(this,true);return false">全选</a>'
        + ' <a href="#" title="清空本渠道勾选" onclick="mpmSetProv(this,false);return false">全不选</a></div>';
-    const grps = (p.model_groups||[]).filter(g => (g.members||[]).length >= 2);
     for(const g of grps){
       const gval = p.id+'::#'+g.name;
       h += '<label class="mpm-item" style="background:rgba(47,93,223,.10);border-radius:8px"><input type="checkbox" value="'+esc(gval)+'"'
@@ -1362,7 +1371,7 @@ function openPoolPicker(poolId, chanPoolId){
          + ' <span class="q-num">'+(g.members||[]).length+' 成员·调组名=组内按声明顺序轮询</span></label>';
     }
     const dis = new Set(p.disabled_models||[]);
-    for(const m of ms){
+    for(const m of vis){
       const val = p.id+'::'+m;
       const mc = catOfP(p, m);
       h += '<label class="mpm-item'+(dis.has(m)?' dim':'')+'" data-cat="'+esc(mc)+'"'+(!CHAT_CATS_FE.includes(mc)?' style="display:none"':'')+'><input type="checkbox" value="'+esc(val)+'"'

@@ -1697,6 +1697,22 @@ def _norm_pool_models(d, items):
             raise HTTPException(400, "渠道 %s 没有模型 %s" % (p.get("name"), m))
         if it not in out:
             out.append(it)
+    # R67：组合为最小选择单位——组被整组引用时，其成员的单独勾选自动移除
+    gmem = {}
+    for it in out:
+        pid2, _, m2 = str(it).partition("::")
+        if m2.startswith("#"):
+            g2 = group_by_name(provs[pid2], m2[1:])
+            if g2:
+                gmem.setdefault(pid2, set()).update(g2.get("members") or [])
+    if gmem:
+        kept = []
+        for it in out:
+            pid2, _, m2 = str(it).partition("::")
+            if not m2.startswith("#") and m2 in gmem.get(pid2, ()):
+                continue
+            kept.append(it)
+        out = kept
     return out
 
 def _brand_of(p):
