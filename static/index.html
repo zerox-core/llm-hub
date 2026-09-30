@@ -148,12 +148,15 @@ function catOf(m){
   if(n.includes('rerank')) return '重排序';
   if(n.includes('tts')||n.includes('cosyvoice')||n.includes('sambert')) return '语音合成';
   if(n.includes('asr')||n.includes('paraformer')||n.includes('gummy')||n.includes('filetrans')) return '语音识别';
-  if(n.includes('t2v')||n.includes('i2v')||n.includes('r2v')||n.includes('video')||n.includes('happyhorse')) return '视频生成';
-  if(n.includes('t2i')||n.includes('i2i')||n.includes('image')||n.includes('wanx')||n.includes('flux')) return '图像生成';
+  if(n.includes('t2v')||n.includes('i2v')||n.includes('r2v')||n.includes('video')||n.includes('happyhorse')||n.includes('seedance')) return '视频生成';
+  if(n.includes('t2i')||n.includes('i2i')||n.includes('image')||n.includes('wanx')||n.includes('flux')||n.includes('seedream')) return '图像生成';
   if(n.includes('omni')||n.includes('vl')||n.includes('vision')) return '多模态';
   if(n.includes('audio')||n.includes('livetranslate')) return '音频';
   return '文本生成';
 }
+
+// R66 试标覆盖优先：cat_overrides 为服务端文本探测纠正结果
+function catOfP(p, m){ const ov = (p && p.cat_overrides) || {}; return ov[m] || catOf(m); }
 
 function toast(msg, isErr){
   const t = document.createElement('div');
@@ -670,7 +673,7 @@ function renderProvider(p, forceOpen, withModels){
 
   // 分类分组
   const groups = {};
-  for(const m of viewModels){ const c = catOf(m); (groups[c] = groups[c] || []).push(m); }
+  for(const m of viewModels){ const c = catOfP(p, m); (groups[c] = groups[c] || []).push(m); }
   const cats = Object.keys(groups).sort((a,b)=>{
     let ia = CAT_ORDER.indexOf(a), ib = CAT_ORDER.indexOf(b);
     if(ia<0) ia = CAT_ORDER.length-1; if(ib<0) ib = CAT_ORDER.length-1;
@@ -762,6 +765,7 @@ function renderProvider(p, forceOpen, withModels){
     '</div>' +
     '<div class="p-ops">' +
       '<button class="small" onclick="refreshModels(\''+p.id+'\')">刷新模型列表</button>' +
+      '<button class="small" title="用文本小调用探测模型真实能力、纠正误分类（不触发图片/视频生成计费）" onclick="probeCats(\''+p.id+'\')">试标分类</button>' +
       (isAg ? '<button class="small" title="同步反重力 5 小时 / 每周额度（不消耗对话额度）" onclick="syncAgQuota()">同步额度</button>' : '') +
       (isWb ? '<button class="small" title="同步 CodeBuddy 积分与每模型使用倍率（不消耗积分）" onclick="syncWbQuota()">同步积分</button>' : '') +
       (isCopilot ? '<button class="small" title="同步 Copilot premium 月配额（只读 check-usage，不耗配额）" onclick="syncCopilotQuota()">同步配额</button>' : '') +
@@ -1121,7 +1125,7 @@ function chanPoolEffectiveMembers(pl){
     const disabled = new Set(p.disabled_models||[]);
     for(const m of orderedModels(p)){
       if(disabled.has(m)) continue;
-      if(!CHAT_CATS_FE.includes(catOf(m))) continue;
+      if(!CHAT_CATS_FE.includes(catOfP(p, m))) continue;
       if(p.type === 'bailian' && qState(m) !== 'free_ok') continue;
       out.push(p.id + '::' + m);
     }
@@ -1332,6 +1336,7 @@ function openPoolPicker(poolId, chanPoolId){
   const pl = poolId ? (STATE.pools||[]).find(x=>x.id===poolId) : null;
   const src = chanPoolId ? (STATE.pools||[]).find(x=>x.id===chanPoolId) : null;
   PICK = {poolId: poolId||null, sel: new Set(pl?(pl.models||[]):[])};
+  PICK_CATS = new Set();
   const provList = src ? (STATE.providers||[]).filter(p => (src.providers||[]).includes(p.id)) : (STATE.providers||[]);
   let h = '<div class="mpm-card">'
        + '<div class="mpm-head">'+(pl ? '编辑使用池「'+esc(pl.name)+'」的模型' : (src ? '从渠道号池「'+esc(src.name)+'」勾选模型，组合为使用池' : '从全部渠道中勾选模型，组合为使用池'))+'</div>'
@@ -1340,6 +1345,7 @@ function openPoolPicker(poolId, chanPoolId){
        + '<button class="small" title="勾选列出的全部可用模型（渠道已停用的除外）" onclick="mpmSetAll(true)">全选可用</button>'
        + '<button class="small" title="清空全部勾选" onclick="mpmSetAll(false)">全不选</button>'
        + '<span>已勾 <b id="mpmCnt">0</b> 个</span></div>'
+       + '<div id="mpmCats" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;font-size:12px"></div>'
        + '<div class="mpm-list">';
   for(const p of provList){
     const ms = orderedModels(p);
@@ -1358,7 +1364,8 @@ function openPoolPicker(poolId, chanPoolId){
     const dis = new Set(p.disabled_models||[]);
     for(const m of ms){
       const val = p.id+'::'+m;
-      h += '<label class="mpm-item'+(dis.has(m)?' dim':'')+'"><input type="checkbox" value="'+esc(val)+'"'
+      const mc = catOfP(p, m);
+      h += '<label class="mpm-item'+(dis.has(m)?' dim':'')+'" data-cat="'+esc(mc)+'"'+(!CHAT_CATS_FE.includes(mc)?' style="display:none"':'')+'><input type="checkbox" value="'+esc(val)+'"'
          + (PICK.sel.has(val)?' checked':'') + (dis.has(m)?' data-dis="1"':'') + ' onchange="mpmCount()"> '+esc(m)+(dis.has(m)?'（渠道已停用）':'')+'</label>';
     }
     h += '</div>';
@@ -1367,12 +1374,39 @@ function openPoolPicker(poolId, chanPoolId){
      + '<button onclick="closePoolPicker()">取消</button><span id="mpmMsg" class="quota-line"></span></div></div>';
   $('#mpModal').innerHTML = h;
   $('#mpModal').style.display = 'flex';
+  mpmRenderCats();
   mpmCount();
+}
+
+// R66 picker 类别过滤：默认只显示对话类（文本生成/多模态/音频），其余类别点 chip 展开/收起
+let PICK_CATS = new Set();
+function mpmRenderCats(){
+  const box = document.getElementById('mpmCats');
+  if(!box) return;
+  const cnt = {};
+  document.querySelectorAll('#mpModal .mpm-item[data-cat]').forEach(el=>{ const c = el.dataset.cat; cnt[c] = (cnt[c]||0)+1; });
+  const extra = Object.keys(cnt).filter(c => !CHAT_CATS_FE.includes(c)).sort((a,b)=>{
+    let ia = CAT_ORDER.indexOf(a), ib = CAT_ORDER.indexOf(b);
+    if(ia<0) ia = CAT_ORDER.length-1; if(ib<0) ib = CAT_ORDER.length-1;
+    return ia - ib;
+  });
+  if(!extra.length){ box.innerHTML = ''; box.style.display = 'none'; return; }
+  box.style.display = 'flex';
+  box.innerHTML = '<span style="color:var(--sub);align-self:center">其他类别（默认隐藏，点击切换）：</span>'
+    + extra.map(c => '<button class="small'+(PICK_CATS.has(c)?' primary':'')+'" onclick="mpmToggleCat(\''+esc(c)+'\')">'+esc(c)+' ('+cnt[c]+')</button>').join('');
+}
+function mpmToggleCat(cat){
+  if(PICK_CATS.has(cat)) PICK_CATS.delete(cat); else PICK_CATS.add(cat);
+  const show = PICK_CATS.has(cat);
+  document.querySelectorAll('#mpModal .mpm-item[data-cat="'+cat+'"]').forEach(el=>{ el.style.display = show ? '' : 'none'; });
+  mpmRenderCats();
 }
 
 function mpmSetAll(on){
   document.querySelectorAll('#mpModal .mpm-item input[type=checkbox]').forEach(i=>{
-    if(on && i.dataset.dis) return;  // 全选只勾渠道未停用的可用模型
+    if(on && i.dataset.dis) return;
+    const _lb = i.closest('.mpm-item');
+    if(_lb && _lb.style.display==='none') return;   // R66 只作用于类别过滤后可见的项  // 全选只勾渠道未停用的可用模型
     i.checked = on;
   });
   mpmCount();
@@ -1383,6 +1417,8 @@ function mpmSetProv(a, on){
   if(!g) return;
   g.querySelectorAll('.mpm-item input[type=checkbox]').forEach(i=>{
     if(on && i.dataset.dis) return;
+    const _lb = i.closest('.mpm-item');
+    if(_lb && _lb.style.display==='none') return;   // R66 只作用于类别过滤后可见的项
     i.checked = on;
   });
   mpmCount();
@@ -1620,7 +1656,7 @@ async function bulkEnable(pid, enabled){
 async function bulkEnableCat(pid, cat, enabled){
   const p = (STATE.providers||[]).find(x=>x.id===pid);
   if(!p) return;
-  const ms = orderedModels(p).filter(m => catOf(m)===cat);
+  const ms = orderedModels(p).filter(m => catOfP(p, m)===cat);
   if(!ms.length){ toast('本分类没有模型', true); return; }
   try{
     await api('/api/providers/'+pid+'/models/enabled_bulk', 'POST', {enabled, models: ms});
@@ -1642,6 +1678,21 @@ async function refreshModels(pid){
 async function setActive(pid, model){
   await api('/api/providers/'+pid+'/active', 'PUT', {model});
   toast('当前模型已切换为 ' + model);
+  await load();
+}
+
+// R66 分类试标：文本小调用探测真实能力，纠正误分类（不触发图片/视频计费）
+async function probeCats(pid){
+  toast('正在试标分类：对疑似误标的模型逐个发文本小调用，模型多的话要等几分钟…');
+  try{
+    const r = await api('/api/providers/'+pid+'/probe_cats', 'POST', {});
+    const rs = r.results || {};
+    const keys = Object.keys(rs).filter(m => !rs[m].skipped);
+    const changed = keys.filter(m => rs[m].cat !== rs[m].name_cat);
+    const failed = keys.filter(m => rs[m].probe_ok === false);
+    if(!r.probed) toast('没有需要试标的模型：本渠道模型名字规则都能判别');
+    else toast('试标完成 ' + keys.length + ' 个：' + (changed.length ? '纠正 ' + changed.length + ' 个（' + changed.slice(0,5).join('、') + (changed.length>5?'…':'') + '）' : '分类均无需纠正') + (failed.length ? '；其中 ' + failed.length + ' 个产不出文本' : ''));
+  }catch(e){ toast('试标失败：' + e.message, true); }
   await load();
 }
 

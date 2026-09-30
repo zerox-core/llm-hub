@@ -529,6 +529,14 @@ def model_category(name: str) -> str:
 
 
 # 可以走 /chat/completions 轮询的类别
+def model_category_for(p, name: str) -> str:
+    """R66 带试标覆盖的分类：渠道 cat_overrides 优先于名字规则。"""
+    ov = (p.get("cat_overrides") or {}).get(name)
+    if ov:
+        return ov
+    return model_category(name)
+
+
 CHAT_CATS = {"文本生成", "多模态", "音频"}
 
 
@@ -803,7 +811,7 @@ def chat_candidates(d, p, extra_cats=None):
     for m in ordered_models(p):
         if m in disabled:
             continue
-        if model_category(m) not in cats:
+        if model_category_for(p, m) not in cats:
             continue
         if p.get("type") == "bailian" and not p.get("allow_paid"):
             st, _ = quota_state(d, m)
@@ -959,7 +967,7 @@ def group_candidates(d, p, g, extra_cats=None):
             continue
         if model_blocked(p, m) or model_disabled(p, m):
             continue
-        if model_category(m) not in (CHAT_CATS | set(extra_cats or ())):
+        if model_category_for(p, m) not in (CHAT_CATS | set(extra_cats or ())):
             continue
         if p.get("type") == "bailian" and not p.get("allow_paid"):
             if quota_state(d, m)[0] != "free_ok":
@@ -1376,7 +1384,7 @@ def refresh_models(pid: str):
         keep_cats = ("文本生成", "多模态", "语音合成", "语音识别", "视频生成")
         filtered = []
         for m in ids:
-            if model_category(m) not in keep_cats:
+            if model_category_for(p, m) not in keep_cats:
                 continue
             if quota_ready and quota_state(d, m)[0] != "free_ok":
                 continue
@@ -1384,7 +1392,7 @@ def refresh_models(pid: str):
         if quota_ready:
             # 并集补回：上游 /models 不列出 wan 视频 / sambert / cosyvoice 等，但额度台账里有免费额度
             for m in (d.get("quota") or {}).get("entries") or {}:
-                if m in filtered or model_category(m) not in keep_cats:
+                if m in filtered or model_category_for(p, m) not in keep_cats:
                     continue
                 if quota_state(d, m)[0] == "free_ok":
                     filtered.append(m)
@@ -1553,6 +1561,55 @@ PAID_BLOCK_TEXT = {
     "free_empty": "免费额度已用完",
     "no_entry": "该模型没有免费额度",
 }
+
+
+class ProbeCatsIn(BaseModel):
+    models: list[str] | None = None     # 缺省 = 名字规则判为对话类的模型（最可能被误标）
+
+
+@app.post("/api/providers/{pid}/probe_cats")
+def probe_cats(pid: str, inp: ProbeCatsIn):
+    """R66 分类试标：文本小调用探测真实能力（不触发图片/视频生成计费）。
+    能产文本 → 清除覆盖（回名字规则）；产不出文本 → 名字细判，仍像对话类则落「其他」。"""
+    d, p = get_provider(pid)
+    if inp.models:
+        ms = [m for m in inp.models if m in (p.get("models") or [])]
+    else:
+        ms = [m for m in ordered_models(p) if model_category(m) in CHAT_CATS]
+    if not ms:
+        return {"ok": True, "probed": 0, "results": {}}
+    if len(ms) > 20:
+        raise HTTPException(400, "一次最多试标 20 个模型，请分批传入 models")
+    overrides = p.setdefault("cat_overrides", {})
+    results = {}
+    for m in ms:
+        if is_ag_provider(p):
+            results[m] = {"skipped": True, "reason": "AG 渠道不试标（避免占用反重力额度）"}
+            continue
+        if p.get("type") == "bailian" and not p.get("allow_paid"):
+            st, _ = quota_state(d, m)
+            if st != "free_ok":
+                results[m] = {"skipped": True, "reason": PAID_BLOCK_TEXT.get(st, st)}
+                continue
+        ok, lat, detail, _u = test_model(p["base_url"], p["api_key"], m,
+                                         use_egress=bool(p.get("use_egress")))
+        name_cat = model_category(m)
+        if ok:
+            overrides.pop(m, None)
+            cat = name_cat
+        else:
+            cat = name_cat if name_cat not in CHAT_CATS else "其他"
+            if cat != name_cat:
+                overrides[m] = cat
+            else:
+                overrides.pop(m, None)
+        results[m] = {"probe_ok": ok, "latency_ms": lat, "cat": cat, "name_cat": name_cat,
+                      "detail": ("" if ok else detail[:200])}
+        log_call({"source": "probe", "provider": p.get("name"),
+                  "model_requested": m, "model_used": m, "ok": ok,
+                  "latency_ms": lat, "error": None if ok else detail[:300]})
+    save_data(d)
+    return {"ok": True, "probed": len(results), "results": results}
 
 
 @app.post("/api/providers/{pid}/test")
@@ -1896,7 +1953,7 @@ def set_harness_model(inp: HarnessModelIn):
             raise HTTPException(404, "模型不在任何渠道：%s" % m)
         if model_disabled(p, mb):
             raise HTTPException(400, "模型未在号池中勾选：%s" % mb)
-        if model_category(mb) not in CHAT_CATS:
+        if model_category_for(p, mb) not in CHAT_CATS:
             raise HTTPException(400, "该模型不是可对话模型：%s" % mb)
     d["harness_model"] = m
     save_data(d)
