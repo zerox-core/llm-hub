@@ -1040,6 +1040,19 @@ function loginChip(p){
   return '';
 }
 
+/* 号池卡渠道行的登录入口按钮（R62：登录入口下沉到号池面板，云端经反代管理口一键授权） */
+function poolAuthBtn(p){
+  if(isWbProvider(p)){
+    const l = (STATE.wb_status||{}).logged_in;
+    return '<button class="small auth-wb" onclick="startWbAuth(this)">'+(l?'重新登录':'登录 WorkBuddy')+'</button>';
+  }
+  if(isAgProvider(p)){
+    const n = ((STATE.ag_quota||{}).accounts||[]).filter(a=>a.ok).length;
+    return '<button class="small auth-ag" onclick="startAgAuth(this)">'+(n?'重新授权':'登回反重力')+'</button>';
+  }
+  return '';
+}
+
 /* 渠道卡上的 OAuth 登录入口行（登录态掉了直接登回） */
 function oauthLine(p){
   if(isWbProvider(p)){
@@ -1074,6 +1087,7 @@ function renderChanPools(){
     const chLines = provs.map(p =>
       '<div class="pv-line">'+provIcon(p)+' <b>'+esc(p.name)+'</b> <span class="chip">'+esc(provKindName(p))+'</span>'
       + loginChip(p)
+      + poolAuthBtn(p)
       + '<span>'+enabledCount(p)+' / '+pvModels(p).length+' 模型</span></div>'
     ).join('') || '<div class="pv-line">（暂未绑定渠道）</div>';
     return '<div class="pv">'
@@ -1741,6 +1755,7 @@ async function startAgAuth(btn){
   btn.disabled = true;
   try{
     const r = await api('/api/ag/login', 'POST', {});
+    if(r.url) window.open(r.url, '_blank');
     toast(r.message || '授权流程已启动，请在浏览器完成 Google 登录');
     btn.textContent = '等待 Google 授权…';
     if(_agPoll) clearInterval(_agPoll);
@@ -1762,7 +1777,7 @@ async function pollAgAuth(){
     if(s.models_count > 0){
       toast('反重力授权成功，反代可用模型 ' + s.models_count + ' 个' + (hr && hr.refreshed ? '，渠道已自动刷新' : ''));
     }else{
-      toast('授权流程已结束，但反代还没有可用模型' + (s.log_tail ? '：' + s.log_tail.slice(-160) : '，可重试'), true);
+      toast('授权流程已结束，但反代还没有可用模型' + (s.note ? '：' + s.note : (s.log_tail ? '：' + s.log_tail.slice(-160) : '，可重试')), true);
     }
     await load();
   }catch(e){ /* 轮询失败忽略，下轮再试 */ }

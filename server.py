@@ -1991,7 +1991,8 @@ def bl_status():
 
 CLIPROXY_DIR = BASE_DIR / "cliproxy"
 AG_LOGIN_LOG = BASE_DIR / "ag_login.log"
-_ag_login = {"proc": None, "started_at": None, "log": None, "restarted": False}
+_ag_login = {"proc": None, "started_at": None, "log": None, "restarted": False,
+              "state": None, "url": None, "cloud_status": None, "detail": None}
 
 
 def find_cliproxy():
@@ -2081,7 +2082,29 @@ def ag_status():
 
 @app.post("/api/ag/login")
 def ag_login_start():
-    if HUB_CLOUD: return {"ok": False, "message": "cloud mode: login locally then migrate auth files"}
+    if HUB_CLOUD:
+        """云端：走 cliproxy 管理口拿反重力授权链接，浏览器完成 Google 登录（无需本地 CLI）。"""
+        if _ag_login.get("state") and _ag_login.get("cloud_status") == "wait":
+            return {"ok": True, "already": True, "url": _ag_login.get("url"),
+                    "message": "反重力授权已在进行中，请在打开的页面完成 Google 登录"}
+        try:
+            r = _wb_mgmt_get("/antigravity-auth-url")
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(502, "无法连接反代管理口（cliproxy 容器未在运行？）：%r" % e)
+        if r.status_code != 200:
+            raise HTTPException(502, "管理口返回 %s：%s" % (r.status_code, r.text[:200]))
+        data = r.json()
+        url, state = data.get("url"), data.get("state")
+        if not url or not state:
+            raise HTTPException(502, "管理口未返回授权链接：" + r.text[:200])
+        _ag_login.update({"state": state, "url": url,
+                          "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                          "cloud_status": "wait", "detail": None,
+                          "proc": None, "log": None, "restarted": False})
+        return {"ok": True, "url": url, "state": state, "cloud": True,
+                "message": "已获取授权链接，请在新页面完成 Google 登录（需有 Antigravity 权限的账号）"}
     """启动 cli-proxy-api -antigravity-login：会在本机弹出浏览器，走 Google 授权。"""
     exe = find_cliproxy()
     if not exe:
@@ -2144,6 +2167,36 @@ def api_ag_quota_refresh():
 @app.get("/api/ag/login/status")
 def ag_login_status():
     """前端轮询：授权进程状态；结束后自动重启反代并刷新 Hub 渠道模型列表。"""
+    if HUB_CLOUD and _ag_login.get("cloud_status") == "wait":
+        out = {"cloud": True, "running": True, "status": "wait",
+               "started_at": _ag_login.get("started_at"),
+               "models_count": 0}
+        try:
+            r = _wb_mgmt_get("/get-auth-status?state=" + _ag_login["state"])
+            if r.status_code == 200:
+                st = r.json()
+                s = st.get("status")
+                if s == "ok":
+                    _ag_login["cloud_status"] = "ok"
+                    out["status"] = "ok"
+                    out["running"] = False
+                    rf = _ag_refresh_hub_provider()
+                    out["hub_refresh"] = rf
+                    out["models_count"] = rf.get("count") or 0
+                    if not out["models_count"]:
+                        out["note"] = "授权成功；若渠道模型未出现，等反代加载凭证后点「刷新模型列表」"
+                elif s == "error":
+                    _ag_login["cloud_status"] = "error"
+                    _ag_login["detail"] = (st.get("error") or st.get("message")
+                                           or "授权失败")[:300]
+                    out["status"] = "error"
+                    out["detail"] = _ag_login["detail"]
+                    out["running"] = False
+        except HTTPException:
+            raise
+        except Exception as e:
+            out["poll_error"] = str(e)[:200]
+        return out
     proc = _ag_login.get("proc")
     running = bool(proc and proc.poll() is None)
     out = {"running": running, "started_at": _ag_login.get("started_at"),
@@ -2365,10 +2418,9 @@ def wb_status():
 
 @app.post("/api/wb/login")
 def wb_login_start():
-    if HUB_CLOUD: return {"ok": False, "message": "cloud mode: login locally then migrate auth files"}
-    """向 CPA 管理口拿 WorkBuddy 登录链接（腾讯 CodeBuddy 登录页）。"""
+    """向 CPA 管理口拿 WorkBuddy 登录链接（腾讯 CodeBuddy 登录页）。云端同样可用。"""
     dll = CLIPROXY_DIR / "plugins" / "workbuddy.dll"
-    if not dll.exists():
+    if not HUB_CLOUD and not dll.exists():
         raise HTTPException(400, "未检测到 cliproxy/plugins/workbuddy.dll 插件")
     if _wb_login.get("state") and _wb_login.get("status") == "wait":
         return {"ok": True, "already": True, "url": _wb_login.get("url"),
