@@ -752,7 +752,7 @@ function renderProvider(p, forceOpen, withModels){
     (blkModels.length ? ' <span class="q-num">当前被过滤：'+esc(blkModels.join('、'))+'</span>' : '') +
     '</div></details>';
 
-  return '<div class="card">' + head + authBoxHtml(p, false) + wbHint +
+  return '<div class="card">' + head + oauthLine(p) + authBoxHtml(p, false) + wbHint +
     '<div class="p-meta">' +
       '<span>URL <code>'+esc(effUrl(p.base_url))+'</code> <button class="small" onclick="cp(\''+esc(effUrl(p.base_url))+'\')">复制</button></span>' +
       '<span>Key <code id="key-'+p.id+'">'+esc(maskKey(p.api_key))+'</code> ' +
