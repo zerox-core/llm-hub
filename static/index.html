@@ -5,6 +5,14 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>LLM Key Hub · 渠道管理</title>
 <link rel="stylesheet" href="/static/hub.css?v=9">
+<style>
+/* 合并组（2026-09-30）*/
+tr.grp-head > td{background:rgba(47,93,223,.06);border-top:2px solid rgba(47,93,223,.35);border-bottom:2px solid rgba(47,93,223,.35);font-weight:600;}
+tr.grp-head .gm-chip{display:inline-block;margin:0 3px;padding:1px 8px;border:1px solid rgba(47,93,223,.35);border-radius:10px;background:#fff;font-weight:400;}
+tr.grp-head .q-num{font-weight:400;}
+tr.grp-head.grp-over > td, tr.mrow.grp-over > td{outline:2px dashed #2f5ddf;outline-offset:-3px;}
+tr.mrow[draggable="true"]{cursor:grab;}
+</style>
 </head>
 <body>
 <aside class="sidebar">
@@ -182,6 +190,7 @@ function enabledCount(p){
 function isAgProvider(p){ return p && p.type === 'openai' && (p.base_url||'').includes(':8317') && p.kind !== 'wb'; }
 function isWbProvider(p){ return p && p.kind === 'wb'; }
 function isCopilotProvider(p){ return p && p.type === 'openai' && (p.base_url||'').includes(':4141'); }
+function isAiStudioProvider(p){ return p && ((p.base_url||'').toLowerCase().indexOf('generativelanguage') >= 0 || (p.name||'').indexOf('AI Studio') >= 0); }
 function agModelGroup(m){ return (m||'').toLowerCase().startsWith('gemini') ? 'gemini' : 'third'; }
 function agGroupTitle(key){ return key === 'gemini' ? 'Gemini 组' : 'Claude/GPT 组'; }
 
@@ -262,6 +271,32 @@ function quotaCell(m, isBailian, p){
       '<span class="quota-bar"><i class="'+cls+'" style="width:'+pct.toFixed(1)+'%"></i></span>' +
       '<span class="q-num">组余 '+(Math.round(worst*1000)/10)+'%</span>';
   }
+  if(p && isAiStudioProvider(p)){
+    const _ans = (STATE.quota_annotations && STATE.quota_annotations.models) || {};
+    const an = _ans[m] || _ans[String(m).replace(/^models\//,'')];
+    if(!an) return '<span class="q-num">—</span>';
+    if(an.error) return '<span class="chip bad">不可用</span> <span class="q-num">'+esc(an.error)+'</span>';
+    let _o = '';
+    if(an.alias_of) _o += '<span class="chip" title="别名模型：与 '+esc(an.alias_of)+' 共享同一份免费额度（Google 按底层模型计数，不单独给额度）">别名→'+esc(an.alias_of)+'</span> ';
+    const _eff = (an.alias_of && _ans[an.alias_of]) ? _ans[an.alias_of] : an;
+    if(an.undisclosed){
+      _o += '<span class="chip warn">今日已触顶</span> <span class="q-num">限额未公开（429 不返回具体数值）</span>';
+    } else if(_eff.rpd || _eff.rpm){
+      const _hit = an.rpd_hit || (an.alias_of && _ans[an.alias_of] && _ans[an.alias_of].rpd_hit);
+      const _vals = (_eff.rpd ? 'RPD '+esc(String(_eff.rpd))+'/天' : '') + ((_eff.rpd && _eff.rpm) ? ' · ' : '') + (_eff.rpm ? 'RPM '+esc(String(_eff.rpm))+'/分' : '');
+      _o += '<span class="chip '+(_hit ? 'bad' : 'ok')+'">'+(_hit ? '今日已触顶 · ' : '')+_vals+'</span>';
+      if(_eff.rpd_lower) _o += ' <span class="q-num">下限值 · 实测 '+esc(String(_eff.ok||''))+' 次未触顶</span>';
+      else if(an.alias_of) _o += ' <span class="q-num">与 '+esc(an.alias_of)+' 共享额度</span>';
+      else _o += ' <span class="q-num">实测上限（429 quotaValue）</span>';
+    } else if(an.rpd_lower){
+      _o += '<span class="chip ok">未触顶</span> <span class="q-num">下限值 · 实测 '+esc(String(_eff.ok||an.ok||''))+' 次成功未触顶</span>';
+    } else if(an.testing){
+      _o += '<span class="q-num">实测中…</span>';
+    } else if(an.pending){
+      _o += '<span class="q-num">排队待测</span>';
+    }
+    return _o || '<span class="q-num">—</span>';
+  }
   if(!isBailian) return '<span class="q-num">—</span>';
   const q = (STATE.quota && STATE.quota.entries) ? STATE.quota.entries[m] : null;
   if(!q) return '<span class="q-num" style="color:var(--bad)">无免费额度</span>';
@@ -302,6 +337,126 @@ function isBlocked(p, m){
   });
 }
 function pvModels(p){ return (p.models||[]).filter(m => !isBlocked(p, m)); }
+
+// ---- 合并组（2026-09-30）：同渠道多个模型并为一个调用名，调组名即按成员顺序轮询、失败自动切换 ----
+function modelGroups(p){ return p.model_groups || []; }
+function groupOfModel(p, m){ return modelGroups(p).find(g => (g.members||[]).includes(m)) || null; }
+function hiddenByGroup(p){
+  const s = new Set();
+  modelGroups(p).forEach(g => (g.members||[]).forEach(x => s.add(x)));
+  return s;
+}
+let _dragM = null;
+function mDragStart(ev, pid, m){
+  _dragM = {pid: pid, model: m};
+  try{ ev.dataTransfer.setData('text/plain', m); ev.dataTransfer.effectAllowed = 'move'; }catch(e){}
+}
+function mDragEnd(ev){
+  _dragM = null;
+  document.querySelectorAll('.dragging,.grp-over').forEach(x => x.classList.remove('dragging','grp-over'));
+}
+function mDragOver(ev, tid){
+  ev.preventDefault();
+  const el = document.getElementById(tid);
+  if(el) el.classList.add('grp-over');
+}
+function mDragLeave(ev, tid){
+  const el = document.getElementById(tid);
+  if(el) el.classList.remove('grp-over');
+}
+async function mDropOnGroup(ev, pid, gname){
+  ev.preventDefault();
+  document.querySelectorAll('.grp-over').forEach(x => x.classList.remove('grp-over'));
+  if(!_dragM || _dragM.pid !== pid || !_dragM.model) return;
+  const m = _dragM.model;
+  const p = STATE.providers.find(x => x.id === pid);
+  const g0 = groupOfModel(p, m);
+  if(g0 && g0.name === gname) return;
+  _dragM = null;
+  const r = await api('/api/providers/'+pid+'/models/merge', 'POST', {model: m, group: gname});
+  if(r.ok){ toast('已把「'+m+'」并入合并组「'+gname+'」'); await load(); }
+  else toast('并入失败：'+(r.error||r.detail||''), true);
+}
+async function mDropOnModel(ev, pid, target){
+  ev.preventDefault();
+  document.querySelectorAll('.grp-over').forEach(x => x.classList.remove('grp-over'));
+  if(!_dragM || _dragM.pid !== pid || !_dragM.model || _dragM.model === target) return;
+  const a = _dragM.model;
+  const p = STATE.providers.find(x => x.id === pid);
+  if(groupOfModel(p, target)){ toast('「'+target+'」已在合并组中：请拖到组头行上', true); _dragM = null; return; }
+  _dragM = null;
+  const name = (prompt('把「'+a+'」和「'+target+'」合并为一个调用名：调用该组名时按成员顺序轮询、失败自动切换。\n\n合并组名：', suggestGroupName([a, target])) || '').trim();
+  if(!name) return;
+  let r = await api('/api/providers/'+pid+'/models/merge', 'POST', {model: a, group: name});
+  if(!r.ok){ toast('合并失败：'+(r.error||r.detail||''), true); return; }
+  r = await api('/api/providers/'+pid+'/models/merge', 'POST', {model: target, group: name});
+  if(!r.ok){
+    await api('/api/providers/'+pid+'/models/unmerge', 'POST', {group: name, model: a});
+    toast('合并失败：'+(r.error||r.detail||'')+'（已回滚）', true);
+    await load(); return;
+  }
+  toast('已创建合并组「'+name+'」：调它即按序轮询 '+a+' → '+target);
+  await load();
+}
+async function unmergeGroup(pid, gname, single){
+  const label = single ? ('把「'+single+'」移出合并组「'+gname+'」？')
+                       : ('解散合并组「'+gname+'」？（成员保留在列表中，恢复独立显示与调用）');
+  if(!confirm(label)) return;
+  const body = single ? {group: gname, model: single} : {group: gname};
+  const r = await api('/api/providers/'+pid+'/models/unmerge', 'POST', body);
+  if(r.ok){ toast(single ? '已移出' : '已拆组'); await load(); }
+  else toast('操作失败：'+(r.error||r.detail||''), true);
+}
+function copyGroupJoin(pid, gname){
+  const p = STATE.providers.find(x => x.id === pid);
+  const g = modelGroups(p).find(x => x.name === gname) || {members: []};
+  const text = 'BASE_URL=' + effUrl(STATE.hub_base || 'http://127.0.0.1:8787/v1') +
+    '\nAPI_KEY=' + (STATE.hub_key || '(见顶栏 Hub Key)') +
+    '\nMODEL=' + gname +
+    '\n# 合并组：调用即按成员顺序轮询 ' + (g.members||[]).join(', ') + '，失败自动切换；实际命中看响应头 X-Hub-Model' +
+    (p ? '\n# 请求头可加 X-Hub-Provider: ' + p.id + ' 指定渠道「' + p.name + '」' : '');
+  cp(text);
+  toast('已复制合并组接入配置：MODEL='+gname);
+}
+function suggestGroupName(members){
+  if(!members || !members.length) return '';
+  let pre = String(members[0]);
+  for(const m of members){
+    let i = 0;
+    while(i < pre.length && i < String(m).length && pre[i] === String(m)[i]) i++;
+    pre = pre.slice(0, i);
+  }
+  const cut = Math.max(pre.lastIndexOf('-'), pre.lastIndexOf('_'), pre.lastIndexOf('.'));
+  if(cut > 0) pre = pre.slice(0, cut);
+  return (pre || 'group') + '-merged';
+}
+function groupHeadRow(p, g){
+  const gid = 'g-' + p.id + '-' + g.name;
+  const chips = (g.members||[]).map(mm =>
+    '<span class="gm-chip">'+esc(mm)+'<a href="javascript:void(0)" onclick="unmergeGroup(\''+p.id+'\',\''+esc(g.name)+'\',\''+esc(mm)+'\')" title="把 '+esc(mm)+' 移出组" style="margin-left:3px;text-decoration:none;color:inherit">×</a></span>').join(' ');
+  return '<tr class="grp-head" id="'+esc(gid)+'" ' +
+    'ondragover="mDragOver(event,\''+esc(gid)+'\')" ondragleave="mDragLeave(event,\''+esc(gid)+'\')" ' +
+    'ondrop="mDropOnGroup(event,\''+p.id+'\',\''+esc(g.name)+'\')" ' +
+    'title="把未入组的模型拖到本行 = 并入组「'+esc(g.name)+'」；调用组名时按 chip 顺序轮询、失败自动切换">' +
+    '<td colspan="6">' +
+    '<span class="chip blue">合并组</span> <b>'+esc(g.name)+'</b> '+chips+' ' +
+    '<span class="q-num">拖模型到此行并入 · 调本名即按序轮询</span>' +
+    '<button class="small" onclick="copyGroupJoin(\''+p.id+'\',\''+esc(g.name)+'\')">复制接入</button>' +
+    '<button class="small danger" onclick="unmergeGroup(\''+p.id+'\',\''+esc(g.name)+'\',\'\')">拆组</button>' +
+    '</td></tr>';
+}
+function groupMemberRow(p, m, g, isBailian){
+  const rowId = 'r-' + p.id + '-sub-' + m;
+  return '<tr class="msub" id="'+esc(rowId)+'" draggable="true" ' +
+    'ondragstart="mDragStart(event,\''+p.id+'\',\''+esc(m)+'\')" ondragend="mDragEnd(event)">' +
+    '<td style="width:3%"></td>' +
+    '<td class="model-id" style="padding-left:26px">↳ '+esc(m)+' <span class="chip" title="合并组成员：下游 /v1/models 不单列，经组名 '+esc(g.name)+' 轮询调用">∈ '+esc(g.name)+'</span></td>' +
+    '<td>'+quotaCell(m, isBailian, p)+'</td>' +
+    '<td>'+testCell(p, m)+'</td>' +
+    '<td></td>' +
+    '<td style="white-space:nowrap"><button class="small" onclick="unmergeGroup(\''+p.id+'\',\''+esc(g.name)+'\',\''+esc(m)+'\')">移出组</button></td>' +
+    '</tr>';
+}
 
 function orderedModels(p){
   const models = p.models || [];
@@ -447,6 +602,7 @@ function renderProvider(p, forceOpen){
     '<span class="chip">'+(isWb?'腾讯 CodeBuddy 反代':(isCopilot?'GitHub Copilot 反代':(isBailian?'阿里云百炼':'OpenAI 兼容')))+'</span>' + wbChip + paidChip +
     '<span class="chip blue">已勾选 '+enabledCount(p)+' / '+pvModels(p).length+'</span>' +
     ((p.models||[]).length - pvModels(p).length > 0 ? '<span class="chip warn">已过滤 '+((p.models||[]).length - pvModels(p).length)+'</span>' : '') +
+    (modelGroups(p).length ? '<span class="chip blue" title="同渠道内多个模型合并为一个调用名：调组名即组内按序轮询、失败自动切换">合并组 '+modelGroups(p).length+'</span>' : '') +
     '<span class="p-active">当前模型：<b>'+esc(p.active_model||'未选择')+'</b>'+activeWarn+'</span>' +
     '<span class="grow"></span>' + poolSwitchSel(p) +
     (forceOpen ? '' : '<button class="small" onclick="toggleCollapse(\''+p.id+'\')">'+(collapsed?'展开':'收起')+'</button>') + '</div>';
@@ -470,7 +626,16 @@ function renderProvider(p, forceOpen){
   });
   const catHtml = cats.map(c => {
     const catId = 'cat-' + p.id + '-' + c;
-    const rows = groups[c].map(m => {
+    const grpHidden = hiddenByGroup(p);
+    const doneG = {};
+    const rowArr = [];
+    for(const m of groups[c]){
+      const g = groupOfModel(p, m);
+      if(g){
+        if(!doneG[g.name]){ doneG[g.name] = 1; rowArr.push(groupHeadRow(p, g)); }
+        rowArr.push(groupMemberRow(p, m, g, isBailian));
+        continue;
+      }
       const cur = p.active_model === m;
       const en = isEnabled(p, m);
       const st = isBailian ? qState(m) : 'free_ok';
@@ -478,22 +643,27 @@ function renderProvider(p, forceOpen){
       const testBtn = (noFree && !p.allow_paid)
         ? '<button class="small" disabled title="无免费额度，未勾选允许付费，不会发起调用">测试</button> '
         : '<button class="small" onclick="testModel(\''+p.id+'\',\''+esc(m)+'\')">测试</button> ';
-      return '<tr class="'+(cur?'current':'')+(en?'':' mdis')+'">' +
+      const rowId = 'r-' + p.id + '-' + c + '-' + m;
+      rowArr.push('<tr class="'+(cur?'current ':'')+(en?'':'mdis ')+'mrow" id="'+esc(rowId)+'" draggable="true" title="拖到另一个模型或组头行上 = 合并为一个调用名" ' +
+        'ondragstart="mDragStart(event,\''+p.id+'\',\''+esc(m)+'\')" ondragend="mDragEnd(event)" ' +
+        'ondragover="mDragOver(event,\''+esc(rowId)+'\')" ondragleave="mDragLeave(event,\''+esc(rowId)+'\')" ' +
+        'ondrop="mDropOnModel(event,\''+p.id+'\',\''+esc(m)+'\')">' +
         '<td style="width:3%"><input type="checkbox" class="mchk" title="勾选 = 进入可调列表（轮询与 Harness 单选）" '+(en?'checked ':'')+'onchange="toggleModel(\''+p.id+'\',\''+esc(m)+'\', this.checked)"></td>' +
         '<td class="model-id">'+esc(m)+(collide(m)?' <span class="chip" title="同名模型存在于多个渠道：经 Hub 统一入口请用「渠道名::模型名」或 X-Hub-Provider 指定渠道">同名多渠道</span>':'')+(cur?' <span class="chip blue">当前</span>':'')+(en?'':' <span class="chip">未勾选</span>')+'</td>' +
         '<td>'+quotaCell(m, isBailian, p)+'</td>' +
         '<td>'+testCell(p, m)+'</td>' +
         '<td style="white-space:nowrap">' +
-          '<button class="tiny" title="上移（轮询顺序）" onclick="moveModel(\''+p.id+'\',\''+esc(m)+'\',-1)">↑</button>' +
-          '<button class="tiny" title="下移（轮询顺序）" onclick="moveModel(\''+p.id+'\',\''+esc(m)+'\',1)">↓</button>' +
+          '<button class="tiny" title="上移（轮询顺序）" onclick="moveModel(\''+p.id+'\',\''+esc(m)+'\',-1)">↑</button> ' +
+          '<button class="tiny" title="下移（轮询顺序）" onclick="moveModel(\''+p.id+'\',\''+esc(m)+'\',1)">↓</button> ' +
         '</td>' +
         '<td style="white-space:nowrap">' +
           (cur ? '' : '<button class="small" onclick="setActive(\''+p.id+'\',\''+esc(m)+'\')">设为当前</button> ') +
           testBtn +
           '<button class="small" onclick="copyJoin(\''+p.id+'\',\''+esc(m)+'\')">复制接入</button> ' +
-          '<button class="small danger" onclick="delModel(\''+p.id+'\',\''+esc(m)+'\')">删除</button>' +
-        '</td></tr>';
-    }).join('');
+          '<button class="small danger" onclick="delModel(\''+p.id+'\',\''+esc(m)+'\')">删除</button> ' +
+        '</td></tr>');
+    }
+    const rows = rowArr.join('');
     const openByDefault = _openCats.size ? _openCats.has(catId) : (c === '文本生成' || groups[c].includes(p.active_model));
     const enCnt = groups[c].filter(m => isEnabled(p, m)).length;
     return '<details class="cat" id="'+catId+'"'+(openByDefault?' open':'')+'><summary>'+esc(c)+'<span class="cnt">'+groups[c].length+' 个模型 · 已勾选 '+enCnt+'</span>' +
@@ -1563,6 +1733,7 @@ async function pollWbAuth(){
 async function load(){
   _openCats = snapshotOpenCats();
   STATE = await api('/api/state');
+  try{ STATE.quota_annotations = await api('/static/quota_annotations.json?ts='+Date.now()); }catch(e){ STATE.quota_annotations = null; }
   if(STATE.cloud_mode){ document.querySelectorAll('.only-local').forEach(el=>{ el.style.display='none'; }); }
   render();
   // 反重力额度超过 10 分钟未同步 → 后台同步一次再重渲染（不消耗对话额度）

@@ -903,6 +903,113 @@ def pool_scope_set(d, pl, extra_cats=None):
     return {(p["id"], m) for p, m in pool_scope_candidates(d, pl, extra_cats=extra_cats)}
 
 
+# ---------------- 合并组（2026-09-30 拍板）：同渠道内多个模型并为一个命名组 ----------------
+# 下游 /v1/models 只见组名（成员隐藏）；调组名 = 组内成员按序轮询 + 失败无缝切换（复用流式故障转移）。
+# 约定：仅限同一渠道内合并；auto 大轮询里成员仍按原名参与；额度/测试记录仍按成员各自记录。
+
+
+def model_groups(p):
+    return p.get("model_groups") or []
+
+
+def group_by_name(p, name):
+    for g in model_groups(p):
+        if str(g.get("name") or "").strip() == str(name or "").strip():
+            return g
+    return None
+
+
+def group_of_member(p, model):
+    for g in model_groups(p):
+        if model in (g.get("members") or []):
+            return g
+    return None
+
+
+def group_hidden_models(p):
+    out = set()
+    for g in model_groups(p):
+        out.update(g.get("members") or [])
+    return out
+
+
+def find_group_providers(d, name):
+    return [p for p in d["providers"] if p.get("base_url") and group_by_name(p, name)]
+
+
+def group_candidates(d, p, g, extra_cats=None):
+    """组成员按声明顺序展开为可调用候选 [(provider, member)]：成员需在 models、未被
+    blocklist/disabled，类别可对话，且满足百炼免费额度 / AG 组状态。"""
+    if not p.get("base_url"):
+        return []
+    out = []
+    for m in (g.get("members") or []):
+        if m not in (p.get("models") or []):
+            continue
+        if model_blocked(p, m) or model_disabled(p, m):
+            continue
+        if model_category(m) not in (CHAT_CATS | set(extra_cats or ())):
+            continue
+        if p.get("type") == "bailian" and not p.get("allow_paid"):
+            if quota_state(d, m)[0] != "free_ok":
+                continue
+        if is_ag_provider(p):
+            agst, _r5, _rw, _cd = ag_group_state(d, m)
+            if agst in ("empty", "cooldown"):
+                continue
+        out.append((p, m))
+    return out
+
+
+def resolve_group(d, model, scope=None, extra_cats=None):
+    """合并组名 → (provider, 组名, err)。镜像 resolve_model 语义：
+    - 支持「渠道名::组名」限定写法；裸组名多渠道同名 → 409；
+    - 号池 scope：组内一个成员都不在池 → 视为该池内不存在（返回 None 交调用方兜底）。"""
+    raw = str(model or "").strip()
+    if "::" in raw:
+        sel, _, bare = raw.partition("::")
+        sel, bare = sel.strip(), bare.strip()
+        for p in d["providers"]:
+            if sel in (p.get("id"), p.get("name")):
+                g = group_by_name(p, bare)
+                if g:
+                    return p, bare, None
+                return None, bare, (404, "渠道「%s」没有合并组 %s。" % (p.get("name"), bare))
+        return None, bare, (404, "找不到渠道：%s。" % sel)
+    provs = find_group_providers(d, raw)
+    if scope is not None:
+        allowed = pool_scope_set(d, scope, extra_cats=extra_cats)
+        provs = [p for p in provs
+                 if any((p["id"], m) in allowed
+                        for m in ((group_by_name(p, raw) or {}).get("members") or []))]
+    if len(provs) > 1:
+        who = "、".join("%s::%s" % (p.get("name") or p.get("id"), raw) for p in provs)
+        return None, raw, (409,
+            "合并组 %s 同时存在于多个渠道（%s）。请改用「渠道名::组名」限定。" % (raw, who))
+    if provs:
+        return provs[0], raw, None
+    return None, raw, None
+
+
+def _prune_groups(p):
+    """剔除已不在 models 里的组成员；成员 <2 的组自动解散。"""
+    gs = p.get("model_groups")
+    if not gs:
+        return
+    out = []
+    for g in gs:
+        ms = [m for m in (g.get("members") or []) if m in (p.get("models") or [])]
+        if len(ms) < 2:
+            continue
+        if ms != (g.get("members") or []):
+            g["members"] = ms
+        out.append(g)
+    if out:
+        p["model_groups"] = out
+    else:
+        p.pop("model_groups", None)
+
+
 # ---------------- 模型列表拉取（OpenAI 兼容） ----------------
 
 def candidate_bases(base_url: str):
@@ -1105,6 +1212,16 @@ class MoveIn(BaseModel):
     dir: int                      # -1 上移 / +1 下移
 
 
+class GroupMergeIn(BaseModel):
+    model: str                     # 要并入组的成员模型名
+    group: str = ""                # 目标组名；空 = 拒绝（面板总会给名字）
+
+
+class GroupNameIn(BaseModel):
+    group: str
+    model: str = ""                # 传入时：只把该成员移出组；否则解散整组
+
+
 class FreetierIn(BaseModel):
     mode: str = "on"              # on | off
 
@@ -1261,6 +1378,7 @@ def refresh_models(pid: str):
             # 过滤后为空（如额度数据未同步/全过期）→ 保留旧列表，避免误清空
             ids = p["models"]
     p["models"] = ids
+    _prune_groups(p)
     p["last_refresh"] = time.strftime("%Y-%m-%d %H:%M:%S")
     p["fetch_error"] = None
     if ids and p.get("active_model") not in ids:
@@ -1278,6 +1396,7 @@ def delete_model(pid: str, inp: ModelIn):
     p.get("test_results", {}).pop(inp.model, None)
     if p.get("active_model") == inp.model:
         p["active_model"] = p["models"][0] if p["models"] else None
+    _prune_groups(p)
     save_data(d)
     return {"ok": True, "left": len(p["models"])}
 
@@ -1297,6 +1416,7 @@ def cleanup_models(pid: str):
                 drop = True
         (removed if drop else keep).append(m)
     p["models"] = keep
+    _prune_groups(p)
     if p.get("model_order"):
         p["model_order"] = [m for m in p["model_order"] if m in keep]
     for m in removed:
@@ -1318,6 +1438,65 @@ def move_model(pid: str, inp: MoveIn):
     if 0 <= j < len(order):
         order[i], order[j] = order[j], order[i]
     p["model_order"] = order
+    save_data(d)
+    return {"ok": True}
+
+
+@app.post("/api/providers/{pid}/models/merge")
+def merge_into_group(pid: str, inp: GroupMergeIn):
+    """把成员模型并入合并组（组不存在则新建；成员已属其他组则自动搬出——一个模型只属一组）。"""
+    d, p = get_provider(pid)
+    m = str(inp.model or "").strip()
+    gname = str(inp.group or "").strip()
+    if not m or m not in (p.get("models") or []):
+        raise HTTPException(404, "模型 %s 不在该渠道中" % m)
+    if not gname:
+        raise HTTPException(400, "请提供合并组名")
+    if "::" in gname or gname == "auto":
+        raise HTTPException(400, "组名不能是 auto，也不能包含 ::（与渠道限定写法冲突）")
+    if any(mm == gname for mm in (p.get("models") or [])):
+        raise HTTPException(400, "组名与渠道内现有模型名重复：%s" % gname)
+    gs = p.get("model_groups") or []
+    # 成员从其他组搬出（一个模型只属一组）
+    for g in gs:
+        ms = g.get("members") or []
+        if m in ms and g.get("name") != gname:
+            g["members"] = [x for x in ms if x != m]
+    # 目标组豁免解散：两步建组时第一步的组暂时只有 1 个成员
+    gs[:] = [g for g in gs if len(g.get("members") or []) >= 2 or g.get("name") == gname]
+    tg = None
+    for g in gs:
+        if g.get("name") == gname:
+            tg = g
+            break
+    if tg is None:
+        tg = {"name": gname, "members": []}
+        gs.append(tg)
+    if m not in (tg.get("members") or []):
+        tg["members"].append(m)
+    p["model_groups"] = gs
+    save_data(d)
+    return {"ok": True, "group": tg}
+
+
+@app.post("/api/providers/{pid}/models/unmerge")
+def unmerge_group(pid: str, inp: GroupNameIn):
+    """解散合并组；传 model 时只把单个成员移出组。成员保留在渠道模型列表中。"""
+    d, p = get_provider(pid)
+    gname = str(inp.group or "").strip()
+    mm = str(inp.model or "").strip()
+    gs = p.get("model_groups") or []
+    if mm:
+        for g in gs:
+            if g.get("name") == gname:
+                g["members"] = [x for x in (g.get("members") or []) if x != mm]
+        gs[:] = [g for g in gs if len(g.get("members") or []) >= 2]
+    else:
+        gs[:] = [g for g in gs if g.get("name") != gname]
+    if gs:
+        p["model_groups"] = gs
+    else:
+        p.pop("model_groups", None)
     save_data(d)
     return {"ok": True}
 
@@ -1637,13 +1816,21 @@ def _harness_options(d):
     for p in d["providers"]:
         if not p.get("base_url"):
             continue
-        ms = chat_candidates(d, p)
-        if ms:
+        hidden = group_hidden_models(p)
+        ms = [m for m in chat_candidates(d, p) if m not in hidden]
+        gs = []
+        for g in model_groups(p):
+            if group_candidates(d, p, g):
+                gn = g.get("name")
+                if holder_count.get(gn, 0) > 0:
+                    gn = "%s::%s" % (p.get("name") or p["id"], gn)
+                gs.append(gn)
+        if ms or gs:
             ms_out = [("%s::%s" % (p.get("name") or p["id"], m)
                        if holder_count.get(m, 0) > 1 else m) for m in ms]
             opts.append({"provider_id": p["id"],
                          "provider_name": p.get("name") or p["id"],
-                         "models": ms_out})
+                         "models": ms_out + gs})
     return opts
 
 
@@ -2282,16 +2469,29 @@ def hub_models(req: Request):
     data = [{"id": "auto", "object": "model", "owned_by": "llm-hub"}]
     seen = {"auto"}
     # 渠道隔离（2026-09-24）：唯一渠道的模型出裸 id；同名多渠道各出一条「渠道名::模型名」限定 id，不再归并。
+    # 合并组（2026-09-30）：组成员从列表隐藏（下游只见组名），组条目在末尾追加
     if scope is not None:
-        pairs = pool_scope_candidates(d, scope, extra_cats={"图像生成", "视频生成", "语音合成", "语音识别"})
+        pairs = [(p, m) for (p, m) in pool_scope_candidates(d, scope, extra_cats={"图像生成", "视频生成", "语音合成", "语音识别"})
+                 if m not in group_hidden_models(p)]
     else:
         pairs = [(p, m) for p in d["providers"]
-                 for m in chat_candidates(d, p, extra_cats={"图像生成"})]
+                 for m in chat_candidates(d, p, extra_cats={"图像生成"})
+                 if m not in group_hidden_models(p)]
     holders = {}
     for p, m in pairs:
         holders.setdefault(m, []).append(p)
     for m, ps in holders.items():
         if len(ps) == 1:
+            # 该名在别处也是模型名（含被隐藏的组成员）→ 裸 id 会 409，改出「渠道名::模型名」限定 id
+            if len(find_model_providers(d, m)) > 1:
+                for p in ps:
+                    qid = "%s::%s" % (p.get("name") or p.get("id"), m)
+                    if qid in seen:
+                        continue
+                    seen.add(qid)
+                    data.append({"id": qid, "object": "model",
+                                 "owned_by": p.get("name") or p.get("type") or "provider"})
+                continue
             if m in seen:
                 continue
             seen.add(m)
@@ -2306,6 +2506,28 @@ def hub_models(req: Request):
                 seen.add(qid)
                 data.append({"id": qid, "object": "model",
                              "owned_by": p.get("name") or p.get("type") or "provider"})
+    # 合并组条目：跨渠道同名组、或组名与任何渠道模型撞名时，出「渠道名::组名」限定 id
+    gseen = set(seen)
+    for p in d["providers"]:
+        if not p.get("base_url"):
+            continue
+        for g in model_groups(p):
+            gname = str(g.get("name") or "").strip()
+            members = [mm for mm in (g.get("members") or []) if mm in (p.get("models") or [])]
+            if not gname or "::" in gname or len(members) < 2:
+                continue
+            if scope is not None:
+                _ga = pool_scope_set(d, scope, extra_cats={"图像生成", "视频生成", "语音合成", "语音识别"})
+                if not any((p["id"], mm) in _ga for mm in members):
+                    continue
+            gid = gname
+            if len(find_group_providers(d, gname)) > 1 or find_model_providers(d, gname):
+                gid = "%s::%s" % (p.get("name") or p.get("id"), gname)
+            if gid in gseen:
+                continue
+            gseen.add(gid)
+            data.append({"id": gid, "object": "model",
+                         "owned_by": (p.get("name") or p.get("type") or "provider")})
     return {"object": "list", "data": data}
 
 
@@ -2332,6 +2554,7 @@ async def hub_chat(req: Request):
                       "error": "key 配额拦截：" + rl[1]["type"]})
             return JSONResponse(status_code=rl[0], content={"error": rl[1]})
     model = body.get("model") or "auto"
+    is_group = False
     stream = bool(body.get("stream"))
 
     # Harness 模型选择：锁定具体模型时，model=auto 的请求固定走该模型（不再轮询）。
@@ -2340,7 +2563,7 @@ async def hub_chat(req: Request):
         pin = (d.get("harness_model") or "auto").strip()
         if pin and pin != "auto":
             _pp, _pm, _pe = resolve_model(d, pin)
-            if _pe or _pp is None or model_disabled(_pp, _pm):
+            if (_pe or _pp is None or model_disabled(_pp, _pm)) and resolve_group(d, pin)[0] is None:
                 log_call({"source": "proxy", "provider": None,
                           "model_requested": "auto", "model_used": None,
                           "ok": False, "blocked": True, "latency_ms": 0,
@@ -2354,7 +2577,12 @@ async def hub_chat(req: Request):
         p = _pick_provider(d, req)
         if model != "auto" and "::" in model:
             model = model.partition("::")[2].strip()
-        scoped = [(p, m) for m in (chat_candidates(d, p) if model == "auto" else [model])]
+        _g0 = group_by_name(p, model) if model != "auto" else None
+        if _g0 is not None:
+            scoped = group_candidates(d, p, _g0)
+            is_group = True
+        else:
+            scoped = [(p, m) for m in (chat_candidates(d, p) if model == "auto" else [model])]
         if scope is not None:
             allowed = pool_scope_set(d, scope)
             scoped = [(p, m) for (p, m) in scoped if (p["id"], m) in allowed]
@@ -2362,40 +2590,69 @@ async def hub_chat(req: Request):
         scoped = pool_scope_candidates(d, scope) if scope is not None else all_chat_candidates(d)
     else:
         # 渠道隔离：裸名唯一渠道放行；同名多渠道 409（不再自动挑第一个）；限定写法精确落渠道。
+        # 合并组（2026-09-30）：模型解析不到（404/无渠道）时再试组名；模型优先、409 冲突不落组。
         p, _mb, _me = resolve_model(d, model, scope=scope, extra_cats={"图像生成"})
-        if _me:
+        gp, _gb = None, model
+        if p is None and (_me is None or _me[0] == 404):
+            gp, _gb, _ge = resolve_group(d, model, scope=scope, extra_cats={"图像生成"})
+        if _me and gp is None:
             log_call({"source": "proxy", "provider": None,
                       "model_requested": model, "model_used": None,
                       "ok": False, "blocked": True, "latency_ms": 0,
                       "error": "同名模型隔离拦截：" + model})
             return JSONResponse(status_code=_me[0], content={"error": {
                 "message": _me[1], "type": "hub_model_ambiguous"}})
-        model = _mb
-        if p is None:
+        model = _gb if gp is not None else _mb
+        if gp is not None:
+            p = gp
+            is_group = True
+            _gg = group_by_name(p, model)
+            scoped = group_candidates(d, p, _gg, extra_cats={"图像生成"})
             if scope is not None:
-                if find_model_providers(d, model):
-                    log_call({"source": "proxy", "provider": None,
+                allowed = pool_scope_set(d, scope, extra_cats={"图像生成"})
+                scoped = [(p, m) for (p, m) in scoped if (p["id"], m) in allowed]
+                if not scoped:
+                    log_call({"source": "proxy", "provider": p.get("name"),
                               "model_requested": model, "model_used": None,
                               "ok": False, "blocked": True, "latency_ms": 0,
-                              "error": "号池范围拦截：" + model})
+                              "error": "号池范围拦截（合并组空）：" + model})
                     return JSONResponse(status_code=403, content={"error": {
-                        "message": "模型 %s 不在号池「%s」范围内，已拦截。" % (model, scope.get("name")),
-                        "type": "hub_pool_scope"}})
-                raise HTTPException(404, "模型 %s 不在号池「%s」范围内" % (model, scope.get("name")))
-            if scope is not None:
-                raise HTTPException(404, "模型 %s 不在号池「%s」范围内" % (model, scope.get("name")))
-            if not d["providers"]:
-                raise HTTPException(400, "还没有任何渠道，请先打开 Hub 页面添加")
-            p = d["providers"][0]
-        scoped = [(p, model)]
-        if scope is not None and (p["id"], model) not in pool_scope_set(d, scope, extra_cats={"图像生成"}):
-            log_call({"source": "proxy", "provider": p.get("name"),
-                      "model_requested": model, "model_used": model,
-                      "ok": False, "blocked": True, "latency_ms": 0,
-                      "error": "号池范围拦截：" + model})
-            return JSONResponse(status_code=403, content={"error": {
-                "message": "模型 %s 不在号池「%s」范围内，已拦截。" % (model, scope.get("name")),
-                "type": "hub_pool_scope"}})
+                        "message": "合并组 %s 的成员均不在号池「%s」范围内，已拦截。" % (model, scope.get("name")),
+                        "type": "hub_group_empty"}})
+            if not scoped:
+                log_call({"source": "proxy", "provider": p.get("name"),
+                          "model_requested": model, "model_used": None,
+                          "ok": False, "blocked": True, "latency_ms": 0,
+                          "error": "合并组成员均不可调用：" + model})
+                return JSONResponse(status_code=403, content={"error": {
+                    "message": "合并组 %s 的成员当前均不可调用（未勾选 / 无免费额度 / 被禁用）。请到渠道号池页检查配置。" % model,
+                    "type": "hub_group_empty"}})
+        else:
+            if p is None:
+                if scope is not None:
+                    if find_model_providers(d, model):
+                        log_call({"source": "proxy", "provider": None,
+                                  "model_requested": model, "model_used": None,
+                                  "ok": False, "blocked": True, "latency_ms": 0,
+                                  "error": "号池范围拦截：" + model})
+                        return JSONResponse(status_code=403, content={"error": {
+                            "message": "模型 %s 不在号池「%s」范围内，已拦截。" % (model, scope.get("name")),
+                            "type": "hub_pool_scope"}})
+                    raise HTTPException(404, "模型 %s 不在号池「%s」范围内" % (model, scope.get("name")))
+                if scope is not None:
+                    raise HTTPException(404, "模型 %s 不在号池「%s」范围内" % (model, scope.get("name")))
+                if not d["providers"]:
+                    raise HTTPException(400, "还没有任何渠道，请先打开 Hub 页面添加")
+                p = d["providers"][0]
+            scoped = [(p, model)]
+            if scope is not None and (p["id"], model) not in pool_scope_set(d, scope, extra_cats={"图像生成"}):
+                log_call({"source": "proxy", "provider": p.get("name"),
+                          "model_requested": model, "model_used": model,
+                          "ok": False, "blocked": True, "latency_ms": 0,
+                          "error": "号池范围拦截：" + model})
+                return JSONResponse(status_code=403, content={"error": {
+                    "message": "模型 %s 不在号池「%s」范围内，已拦截。" % (model, scope.get("name")),
+                    "type": "hub_pool_scope"}})
 
     scoped = _demote_failed(scoped)
 
@@ -2413,7 +2670,7 @@ async def hub_chat(req: Request):
                 "message": "没有可调用的免费额度模型（全部无额度/耗尽/过期）。如确认付费调用，请在 Hub 页面勾选「允许付费」。",
                 "type": "hub_no_free_model"}})
     else:
-        if model_disabled(p, model):
+        if not is_group and model_disabled(p, model):
             log_call({"source": "proxy", "provider": p.get("name"),
                       "model_requested": model, "model_used": model,
                       "ok": False, "blocked": True, "latency_ms": 0,
@@ -2421,7 +2678,7 @@ async def hub_chat(req: Request):
             return JSONResponse(status_code=403, content={"error": {
                 "message": "模型 %s 未在号池中勾选，已拦截。请到渠道管理页勾选后再调用。" % model,
                 "type": "hub_model_disabled"}})
-        if p.get("type") == "bailian" and not p.get("allow_paid"):
+        if not is_group and p.get("type") == "bailian" and not p.get("allow_paid"):
             st, _ = quota_state(d, model)
             if st != "free_ok":
                 msg = PAID_BLOCK_TEXT.get(st, st)
@@ -2433,7 +2690,7 @@ async def hub_chat(req: Request):
                     "message": "模型 {} {}，已按「仅免费额度」策略拦截。如需付费调用请勾选「允许付费」。".format(
                         model, msg),
                     "type": "hub_paid_blocked"}})
-        if is_ag_provider(p):
+        if not is_group and is_ag_provider(p):
             agst, _r5, _rw, cd = ag_group_state(d, model)
             if agst in ("empty", "cooldown"):
                 gname = AG_GROUP_TITLES.get(ag_model_group(model), "额度组")
@@ -3180,18 +3437,20 @@ async def anth_messages(req: Request):
                       "error": "key 配额拦截：" + rl[1]["type"]})
             return _anth_err(rl[0], rl[1]["message"])
     model = body.get("model") or "auto"
+    is_group = False
     # 渠道隔离：限定写法解析失败显式报错；裸名多渠道 409；裸名无渠道 → 保留 Claude Code 的 auto 回退。
+    # 合并组（2026-09-30）：404/无渠道时再试组名；组名不吞回 auto。
     if model != "auto":
         _p0, _m0, _e0 = resolve_model(d, model)
-        if _e0:
+        if _e0 and not (_p0 is None and _e0[0] == 404 and resolve_group(d, model)[0] is not None):
             return _anth_err(_e0[0], _e0[1])
-        if _p0 is None and "::" not in str(model):
+        if _p0 is None and "::" not in str(model) and resolve_group(d, model)[0] is None:
             model = "auto"
     if model == "auto" and not req.headers.get("x-hub-provider") and scope is None:
         pin = (d.get("harness_model") or "auto").strip()
         if pin and pin != "auto":
             _pp, _pm, _pe = resolve_model(d, pin)
-            if _pe or _pp is None or model_disabled(_pp, _pm):
+            if (_pe or _pp is None or model_disabled(_pp, _pm)) and resolve_group(d, pin)[0] is None:
                 return _anth_err(409, "Harness 锁定模型 %s 已不可用（或同名多渠道冲突，请用 渠道名::模型名 锁定），请到 Harness 页重新选择或切回 Auto。" % pin)
             model = pin
     obody = _anth_to_openai(body)
@@ -3202,7 +3461,12 @@ async def anth_messages(req: Request):
         p = _pick_provider(d, req)
         if model != "auto" and "::" in model:
             model = model.partition("::")[2].strip()
-        scoped = [(p, m) for m in (chat_candidates(d, p) if model == "auto" else [model])]
+        _g0 = group_by_name(p, model) if model != "auto" else None
+        if _g0 is not None:
+            scoped = group_candidates(d, p, _g0)
+            is_group = True
+        else:
+            scoped = [(p, m) for m in (chat_candidates(d, p) if model == "auto" else [model])]
         if scope is not None:
             allowed = pool_scope_set(d, scope)
             scoped = [(p, m) for (p, m) in scoped if (p["id"], m) in allowed]
@@ -3210,26 +3474,43 @@ async def anth_messages(req: Request):
         scoped = pool_scope_candidates(d, scope) if scope is not None else all_chat_candidates(d)
     else:
         # 渠道隔离：同名多渠道 409，不再自动挑第一个；限定写法精确落渠道。
+        # 合并组（2026-09-30）：模型解析不到（404/无渠道）时再试组名；模型优先、409 冲突不落组。
         p, _mb, _me = resolve_model(d, model, scope=scope, extra_cats={"图像生成"})
-        if _me:
+        gp, _gb = None, model
+        if p is None and (_me is None or _me[0] == 404):
+            gp, _gb, _ge = resolve_group(d, model, scope=scope, extra_cats={"图像生成"})
+        if _me and gp is None:
             log_call({"source": "proxy-anthropic", "provider": None,
                       "model_requested": model, "model_used": None,
                       "ok": False, "blocked": True, "latency_ms": 0,
                       "error": "同名模型隔离拦截：" + str(model)})
             return _anth_err(_me[0], _me[1])
-        model = _mb
-        if p is None:
-            return _anth_err(404, "找不到模型：%s（不在任何渠道，或不在号池范围内）" % model)
-        scoped = [(p, model)]
-        if scope is not None and (p["id"], model) not in pool_scope_set(d, scope, extra_cats={"图像生成"}):
-            return _anth_err(403, "模型 %s 不在号池「%s」范围内，已拦截。" % (model, scope.get("name")))
+        model = _gb if gp is not None else _mb
+        if gp is not None:
+            p = gp
+            is_group = True
+            _gg = group_by_name(p, model)
+            scoped = group_candidates(d, p, _gg, extra_cats={"图像生成"})
+            if scope is not None:
+                allowed = pool_scope_set(d, scope, extra_cats={"图像生成"})
+                scoped = [(p, m) for (p, m) in scoped if (p["id"], m) in allowed]
+                if not scoped:
+                    return _anth_err(403, "合并组 %s 的成员均不在号池「%s」范围内，已拦截。" % (model, scope.get("name")))
+            if not scoped:
+                return _anth_err(403, "合并组 %s 的成员当前均不可调用（未勾选 / 无免费额度 / 被禁用），已拦截。" % model)
+        else:
+            if p is None:
+                return _anth_err(404, "找不到模型：%s（不在任何渠道，或不在号池范围内）" % model)
+            scoped = [(p, model)]
+            if scope is not None and (p["id"], model) not in pool_scope_set(d, scope, extra_cats={"图像生成"}):
+                return _anth_err(403, "模型 %s 不在号池「%s」范围内，已拦截。" % (model, scope.get("name")))
     if not scoped:
         log_call({"source": "proxy-anthropic", "provider": None,
                   "model_requested": model, "model_used": None,
                   "ok": False, "blocked": True, "latency_ms": 0,
                   "error": "没有可调用的免费额度模型"})
         return _anth_err(403, "没有可调用的免费额度模型（全部无额度/耗尽/过期）。")
-    if model != "auto":
+    if model != "auto" and not is_group:
         p0 = scoped[0][0]
         if model_disabled(p0, model):
             return _anth_err(403, "模型 %s 未在号池中勾选，已拦截。" % model)
