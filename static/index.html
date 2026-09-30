@@ -1222,7 +1222,7 @@ function renderUsePools(){
   }
   let h = '';
   for(const pl of pools){
-    const names = (pl.models||[]).map(s => esc(String(s).split('::').pop())).join('、');
+    const names = (pl.models||[]).map(s => { const t = String(s).split('::').pop(); return t.charAt(0)==='#' ? '⊞'+esc(t.slice(1)) : esc(t); }).join('、');
     h += '<div class="pp-pool">'
        + '<div class="pp-row"><span class="pp-name">◆ '+esc(pl.name)+'</span>'
        + '<span class="chip">'+(pl.models||[]).length+' 模型 · 跨渠道</span>'
@@ -1348,6 +1348,13 @@ function openPoolPicker(poolId, chanPoolId){
        + '<div class="mpm-prov">'+esc(p.name)+' <span class="chip">'+ms.length+'</span>'
        + ' <a href="#" style="margin-left:8px" title="勾选本渠道全部可用模型" onclick="mpmSetProv(this,true);return false">全选</a>'
        + ' <a href="#" title="清空本渠道勾选" onclick="mpmSetProv(this,false);return false">全不选</a></div>';
+    const grps = (p.model_groups||[]).filter(g => (g.members||[]).length >= 2);
+    for(const g of grps){
+      const gval = p.id+'::#'+g.name;
+      h += '<label class="mpm-item" style="background:rgba(47,93,223,.10);border-radius:8px"><input type="checkbox" value="'+esc(gval)+'"'
+         + (PICK.sel.has(gval)?' checked':'') + ' onchange="mpmCount()"> <span class="chip blue">合并组</span> <b>'+esc(g.name)+'</b>'
+         + ' <span class="q-num">'+(g.members||[]).length+' 成员·调组名=组内按声明顺序轮询</span></label>';
+    }
     const dis = new Set(p.disabled_models||[]);
     for(const m of ms){
       const val = p.id+'::'+m;

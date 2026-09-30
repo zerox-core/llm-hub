@@ -879,25 +879,36 @@ def resolve_model(d, model, scope=None, extra_cats=None):
 
 
 def pool_scope_candidates(d, pl, extra_cats=None):
-    """号池 key 的候选 (provider, model) 对：
-    模型粒度号池（pool.models 非空）= 勾选的模型；渠道粒度号池 = 池内全部渠道的可对话模型。
-    extra_cats 仅列表/显式调用校验时放行（如图像生成）；auto 轮询不传。"""
+    """池 key 的候选 (provider, model) 对：
+    模型勾选池（pool.models 非空）= 勾选的模型；渠道归属池 = 渠道全部可对话模型。
+    组合引用（2026-09-30 R65）："渠道id::#组合名" 展开为整组成员（按声明顺序），
+    成员随之进入池范围（auto 池内轮询可用、组名可调、组轮询的成员级过滤放行）。
+    extra_cats 仅列表/测试类调用用，聊天调用不含图像生成，auto 轮询不含。"""
     out = []
     if pl.get("models"):
         provs = {p["id"]: p for p in d["providers"]}
+        seen = set()
         for item in pl["models"]:
             pid, _, m = str(item or "").partition("::")
             p = provs.get(pid)
             if not p or not p.get("base_url"):
                 continue
-            if m in chat_candidates(d, p, extra_cats=extra_cats):
-                out.append((p, m))
+            if m.startswith("#"):
+                g = group_by_name(p, m[1:])
+                members = list((g or {}).get("members") or [])
+            else:
+                members = [m]
+            for mm in members:
+                if (p["id"], mm) in seen:
+                    continue
+                if mm in chat_candidates(d, p, extra_cats=extra_cats):
+                    seen.add((p["id"], mm))
+                    out.append((p, mm))
         return out
     for p in d["providers"]:
         if p.get("pool_id") == pl["id"] and p.get("base_url"):
             out.extend((p, m) for m in chat_candidates(d, p, extra_cats=extra_cats))
     return out
-
 
 def pool_scope_set(d, pl, extra_cats=None):
     return {(p["id"], m) for p, m in pool_scope_candidates(d, pl, extra_cats=extra_cats)}
@@ -1612,7 +1623,9 @@ class EnabledBulkIn(BaseModel):
 
 
 def _norm_pool_models(d, items):
-    """规范化模型粒度成员：["渠道id::模型id"]；校验渠道与模型存在。"""
+    """规范化模型勾选成员 ["渠道id::模型id"]，校验渠道、模型存在。
+    组合引用（2026-09-30 R65）："渠道id::#组合名" = 整组引用，校验组合存在；
+    组定义单一来源在渠道层，组员改动自动跟随所有引用它的池。"""
     provs = {p["id"]: p for p in d["providers"]}
     out = []
     for it in items or []:
@@ -1620,12 +1633,14 @@ def _norm_pool_models(d, items):
         p = provs.get(pid)
         if not p:
             raise HTTPException(400, "渠道不存在：%s" % pid)
-        if m not in (p.get("models") or []):
-            raise HTTPException(400, "渠道 %s 下没有模型 %s" % (p.get("name"), m))
+        if m.startswith("#"):
+            if not group_by_name(p, m[1:]):
+                raise HTTPException(400, "渠道 %s 没有合并组 %s" % (p.get("name"), m[1:]))
+        elif m not in (p.get("models") or []):
+            raise HTTPException(400, "渠道 %s 没有模型 %s" % (p.get("name"), m))
         if it not in out:
             out.append(it)
     return out
-
 
 def _brand_of(p):
     """渠道品牌归类（2026-09-25 R49 拍板）：同品牌多账号合并进同一个渠道号池。
