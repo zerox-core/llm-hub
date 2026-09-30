@@ -91,7 +91,7 @@ tr.msub.grp-over > td{outline:2px dashed #2f5ddf;outline-offset:-3px;background:
 
   <div id="overviewSec">
     <div id="pageUpstream" class="page" style="display:none;">
-    <div class="sec-title"><span>上游渠道 · 按厂商分类（每个渠道一个账号 / 反代；点厂商卡进对应渠道号池做调用分发管理，点渠道行进账号设置）</span></div>
+    <div class="sec-title"><span>上游渠道（每个渠道一个账号 / 反代 · 点「进入管理」做账号设置；模型的调用分发 / 合并组在「渠道号池」页管理）</span></div>
     <div class="panel-grid" id="panels"></div>
 
     <details class="raw"><summary>调用配置（Hub 入口 + 各渠道直连地址，调试用）</summary>
@@ -112,7 +112,7 @@ tr.msub.grp-over > td{outline:2px dashed #2f5ddf;outline-offset:-3px;background:
     <div class="sec-title" style="display:flex;align-items:center;gap:10px">
       <span>渠道号池 · 主要调用分发中枢（与上游品牌一一对应 · 添加渠道自动归并、新品牌自动建池 · 模型启停 / 排序 / 合并组都在这里管）</span>
     </div>
-    <div class="card pool-panel" id="chanPoolPanel"></div>
+    <div class="panel-grid" id="chanPoolPanel"></div>
     </div><!-- /pagePools -->
 
     <div id="pageUsepools" class="page" style="display:none;">
@@ -996,39 +996,25 @@ function renderPanels(){
   const g = $('#panels');
   if(!g) return;
   const ps = STATE.providers || [];
-  if(!ps.length){ g.innerHTML = '<div class="card" style="padding:22px;color:var(--sub)">还没有渠道，点右上角「+ 添加渠道」创建第一个（保存后自动按品牌归并 / 创建渠道号池）。</div>'; return; }
-  const chanPools = (STATE.pools||[]).filter(isChanPool);
-  let h = '';
-  const grouped = new Set();
-  for(const pl of chanPools){
-    const provs = ps.filter(p => (pl.providers||[]).includes(p.id));
-    provs.forEach(p => grouped.add(p.id));
-    h += '<div class="vc-card" title="进入「'+esc(pl.name)+'」号池管理" onclick="openChanPoolDetail(\''+pl.id+'\')">'
-       + '<div class="vc-brand">◆ '+esc(pl.name)
-       + '<span class="chip">'+provs.length+' 渠道</span>'
-       + ((pl.models||[]).length ? '<span class="chip">'+pl.models.length+' 池模型</span>' : '<span class="chip">池成员跟随上游</span>')
-       + '</div>';
-    for(const p of provs){
-      h += '<div class="vc-ch" onclick="event.stopPropagation();openProvider(\''+p.id+'\')" title="进入该渠道账号设置">'
-         + '<span>'+provIcon(p)+' '+esc(p.name)+' <span class="vc-meta">'+esc(provKindName(p))+'</span></span>'
-         + '<span class="vc-meta">'+enabledCount(p)+' / '+pvModels(p).length+' 模型 '+loginChip(p)+'</span>'
-         + '</div>';
-    }
-    h += '<div class="vc-go">进入号池管理（模型启停 / 排序 / 合并组）›</div></div>';
-  }
-  const rest = ps.filter(p => !grouped.has(p.id));
-  if(rest.length){
-    h += '<div class="vc-card">'
-       + '<div class="vc-brand">◇ 未归组渠道<span class="chip">'+rest.length+'</span></div>';
-    for(const p of rest){
-      h += '<div class="vc-ch" onclick="openProvider(\''+p.id+'\')">'
-         + '<span>'+provIcon(p)+' '+esc(p.name)+' <span class="vc-meta">'+esc(provKindName(p))+'</span></span>'
-         + '<span class="vc-meta">'+enabledCount(p)+' / '+pvModels(p).length+' 模型</span>'
-         + '</div>';
-    }
-    h += '</div>';
-  }
-  g.innerHTML = h;
+  if(!ps.length){ g.innerHTML = '<div class="card" style="padding:22px;color:var(--sub)">还没有渠道，点右上角「+ 添加渠道」创建第一个。</div>'; return; }
+  const wbst = STATE.wb_status || {};
+  g.innerHTML = ps.map(p => {
+    const rawUrl = p.base_url || '';
+    return '<div class="pv">' +
+      '<div class="pv-head"><span class="pv-ico">'+provIcon(p)+'</span><span class="pv-name">'+esc(p.name)+'</span><span class="chip">'+provKindName(p)+'</span>' +
+      (isWbProvider(p) ? (wbst.logged_in ? '<span class="chip ok">WB 已登录</span>' : '<span class="chip bad">WB 未登录</span>') : '') +
+      (p.use_egress ? '<span class="chip">出海代理</span>' : '') +
+      (p.allow_paid ? '<span class="chip warn">允许付费</span>' : '') +
+      '</div>' +
+      '<div class="pv-line">当前模型 <b>'+esc(p.active_model||'未选择')+'</b></div>' +
+      '<div class="pv-line">已勾选 <b>'+enabledCount(p)+' / '+pvModels(p).length+'</b>'+provQuotaLine(p)+'</div>' +
+      '<div class="pv-line">URL <code>'+esc(rawUrl)+'</code><button class="small" onclick="cp(\''+esc(rawUrl)+'\')">复制</button></div>' +
+      '<div class="pv-line">Key <code>'+esc(maskKey(p.api_key))+'</code><button class="small" onclick="cp(\''+esc(p.api_key||'')+'\')">复制</button></div>' +
+      oauthLine(p) +
+      authBoxHtml(p, false) +
+      '<div class="pv-foot"><button class="pv-go" onclick="openProvider(\''+p.id+'\')">进入管理 ›</button></div>' +
+      '</div>';
+  }).join('');
 }
 
 // ---------------- 总览：②渠道号池 / ③使用池 / ④分发 key ----------------
@@ -1077,33 +1063,33 @@ function renderChanPools(){
   const eu = effUrl(STATE.hub_base || 'http://127.0.0.1:8787/v1');
   const pools = (STATE.pools||[]).filter(isChanPool);
   if(!pools.length){
-    el.innerHTML = '<div class="q-num" style="padding:10px 2px">还没有渠道号池——点右上角「+ 添加渠道」，保存后自动按品牌归并/创建渠道号池。</div>';
+    el.innerHTML = '<div class="card" style="padding:22px;color:var(--sub)">还没有渠道号池——点右上角「+ 添加渠道」，保存后自动按品牌归并/创建渠道号池。</div>';
     return;
   }
-  let h = '';
-  for(const pl of pools){
+  el.innerHTML = pools.map(pl => {
     const provs = ps.filter(p => (pl.providers||[]).includes(p.id));
-    const provChips = provs.map(p => '<span class="pill">'+esc(p.name)+' '+loginChip(p)+'</span>').join('') || '<span class="cell-muted">（空）</span>';
     const mcnt = (pl.models||[]).length;
     const gcnt = provs.reduce((a,x)=>a+((x.model_groups||[]).length),0);
-    h += '<div class="pp-pool">'
-       + '<div class="pp-row"><span class="pp-name">◆ '+esc(pl.name)+'</span>'
-       + '<span class="chip">'+provs.length+' 账号</span>'
-       + (mcnt ? '<span class="chip">'+mcnt+' 模型</span>' : '')
-       + (gcnt ? '<span class="chip">'+gcnt+' 合并组</span>' : '')
-       + '</div>'
-       + '<div class="pp-row"><span class="pp-name">URL</span><code class="pp-key">'+esc(eu)+'</code><button class="small" onclick="cp(\''+esc(eu)+'\')">复制</button>'
-       + '<span class="pp-name">key</span><code class="pp-key">'+esc(maskKey(pl.key))+'</code>'
-       + '<button class="small" onclick="cp(\''+esc(pl.key||'')+'\')">复制</button>'
-       + '<button class="small" onclick="resetPoolKey(\''+pl.id+'\')">重置key</button></div>'
-       + '<div class="pp-sub">渠道：'+provChips+' · 池内 auto 轮询</div>'
-       + '<div class="pp-ops">'
-       + '<a href="#" onclick="openChanPoolDetail(\''+pl.id+'\');return false">管理调用分发 ›</a>'
-       + '<a href="#" onclick="openPoolPicker(null,\''+pl.id+'\');return false">＋ 从这里建使用池</a>'
-       + '<a href="#" onclick="renamePool(\''+pl.id+'\',\''+esc(pl.name)+'\');return false">改名</a>'
-       + '</div></div>';
-  }
-  el.innerHTML = h;
+    const icon = provs.length ? provIcon(provs[0]) : '◆';
+    const chLines = provs.map(p =>
+      '<div class="pv-line">'+provIcon(p)+' <b>'+esc(p.name)+'</b> <span class="chip">'+esc(provKindName(p))+'</span>'
+      + loginChip(p)
+      + '<span>'+enabledCount(p)+' / '+pvModels(p).length+' 模型</span></div>'
+    ).join('') || '<div class="pv-line">（暂未绑定渠道）</div>';
+    return '<div class="pv">'
+      + '<div class="pv-head"><span class="pv-ico">'+icon+'</span><span class="pv-name">'+esc(pl.name)+'</span>'
+      + '<span class="chip">'+provs.length+' 账号</span>'
+      + (mcnt ? '<span class="chip">'+mcnt+' 池模型</span>' : '<span class="chip">池成员跟随上游</span>')
+      + (gcnt ? '<span class="chip">'+gcnt+' 合并组</span>' : '')
+      + '</div>'
+      + '<div class="pv-line">URL <code>'+esc(eu)+'</code><button class="small" onclick="cp(\''+esc(eu)+'\')">复制</button></div>'
+      + '<div class="pv-line">Key <code>'+esc(maskKey(pl.key))+'</code><button class="small" onclick="cp(\''+esc(pl.key||'')+'\')">复制</button><button class="small" onclick="resetPoolKey(\''+pl.id+'\')">重置key</button></div>'
+      + chLines
+      + '<div class="pv-foot"><button class="pv-go" onclick="openChanPoolDetail(\''+pl.id+'\')">进入号池管理（模型启停 / 排序 / 合并组）›</button>'
+      + '<button class="small" style="margin-left:8px;margin-top:6px" onclick="openPoolPicker(null,\''+pl.id+'\')">＋ 从这里建使用池</button>'
+      + '<button class="small" style="margin-left:8px;margin-top:6px" onclick="renamePool(\''+pl.id+'\',\''+esc(pl.name)+'\')">改名</button></div>'
+      + '</div>';
+  }).join('');
 }
 
 // ---------------- 渠道号池详情页（R57 2026-09-26）：成员只能从所绑渠道（上游）加/删 ----------------
