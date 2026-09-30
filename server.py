@@ -4465,6 +4465,10 @@ def static_files(filename: str):
     except ValueError:
         raise HTTPException(404)
     if not fn.is_file():
+        if filename == "quota_annotations.json":
+            alt = Path("/data/quota_probe/web_annotations.json")
+            if alt.is_file():
+                return FileResponse(alt)
         raise HTTPException(404)
     return FileResponse(fn)
 
