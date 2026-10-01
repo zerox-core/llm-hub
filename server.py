@@ -1661,6 +1661,8 @@ def test(pid: str, inp: ModelIn):
 class PoolIn(BaseModel):
     name: str
     models: list[str] | None = None     # 模型粒度成员：["渠道id::模型id", ...]
+    mode: str | None = None             # key 轮询方式：auto=池内轮询+故障转移（默认，预留 failover 等策略）
+    default_model: str | None = None    # 池 key 缺省模型（不设 = auto 池内轮询）
 
 
 class PoolUpdate(BaseModel):
@@ -1669,6 +1671,8 @@ class PoolUpdate(BaseModel):
     reset_key: bool = False             # 重置号池 key（旧 key 立即失效）
     models: list[str] | None = None     # 更新模型粒度成员
     clear_models: bool = False          # 清掉模型粒度成员，改回渠道粒度
+    mode: str | None = None             # key 轮询方式（默认 auto）
+    default_model: str | None = None    # 缺省模型；传空串清除
 
 
 class EnabledIn(BaseModel):
@@ -1769,7 +1773,7 @@ def _find_or_create_channel_pool(d, p):
             return pl, True
     pl = {"id": "pool_" + uuid.uuid4().hex[:8], "name": bname,
           "created_at": now_str(), "key": _pool_new_key(),
-          "channel_brand": brand, "models": []}
+          "channel_brand": brand, "models": [], "mode": "auto"}
     pools.append(pl)
     return pl, True
 
@@ -1814,6 +1818,8 @@ def _pool_view(d):
                     "providers": [p["id"] for p in provs],
                     "channel_pid": pl.get("channel_pid") or "",
                     "channel_brand": pl.get("channel_brand") or "",
+                    "mode": pl.get("mode") or "auto",
+                    "default_model": pl.get("default_model") or "",
                     "url": pl.get("url") or ""})
     known = {pl["id"] for pl in d.get("pools") or []}
     rest = [p for p in d["providers"] if p.get("pool_id") not in known]
@@ -1836,7 +1842,10 @@ def add_pool(inp: PoolIn):
     pl = {"id": "pool_" + uuid.uuid4().hex[:8],
           "name": inp.name.strip() or "未命名号池",
           "key": _pool_new_key(),
+          "mode": (inp.mode or "auto").strip() or "auto",
           "created_at": time.strftime("%Y-%m-%d %H:%M:%S")}
+    if inp.default_model and inp.default_model.strip():
+        pl["default_model"] = inp.default_model.strip()
     if inp.models is not None:
         pl["models"] = _norm_pool_models(d, inp.models)
     d["pools"].append(pl)
@@ -1855,6 +1864,14 @@ def update_pool(pool_id: str, inp: PoolUpdate):
         pl["name"] = inp.name.strip() or pl["name"]
     if inp.reset_key:
         pl["key"] = _pool_new_key()
+    if inp.mode is not None:
+        pl["mode"] = inp.mode.strip() or "auto"
+    if inp.default_model is not None:
+        _dm = inp.default_model.strip()
+        if _dm:
+            pl["default_model"] = _dm
+        else:
+            pl.pop("default_model", None)
     if inp.models is not None:
         pl["models"] = _norm_pool_models(d, inp.models)
     if inp.clear_models:
@@ -2676,12 +2693,13 @@ def _require_hub_key(d, req):
 
 @app.get("/v1/models")
 def hub_models(req: Request):
-    """统一模型清单：auto + 各渠道可对话模型 + 图像生成模型（供标准客户端拉列表，需 hub_key）。
+    """统一模型清单：各渠道可对话模型 + 图像生成模型（供标准客户端拉列表，需 hub_key）。
+    auto 是调用选项而非模型、不在列表出现（2026-10-01 拍板）；调用侧 model=auto 照常可用。
     图像生成模型只在列表中可见、可显式指定调用；不进入 auto 轮询。"""
     d = load_data()
     scope = _require_hub_key(d, req)
-    data = [{"id": "auto", "object": "model", "owned_by": "llm-hub"}]
-    seen = {"auto"}
+    data = []
+    seen = set()
     # 渠道隔离（2026-09-24）：唯一渠道的模型出裸 id；同名多渠道各出一条「渠道名::模型名」限定 id，不再归并。
     # 合并组（2026-09-30）：组成员从列表隐藏（下游只见组名），组条目在末尾追加
     if scope is not None:
@@ -2767,7 +2785,10 @@ async def hub_chat(req: Request):
                       "ok": False, "blocked": True, "latency_ms": 0,
                       "error": "key 配额拦截：" + rl[1]["type"]})
             return JSONResponse(status_code=rl[0], content={"error": rl[1]})
-    model = body.get("model") or "auto"
+    model = (body.get("model") or "").strip()
+    if not model:
+        # 号池 key 缺省模型按池属性走：default_model 优先，否则 auto（池内轮询；mode 为预留策略位）
+        model = (scope.get("default_model") or "auto") if scope is not None else "auto"
     is_group = False
     stream = bool(body.get("stream"))
 
@@ -3673,7 +3694,10 @@ async def anth_messages(req: Request):
                       "ok": False, "blocked": True, "latency_ms": 0,
                       "error": "key 配额拦截：" + rl[1]["type"]})
             return _anth_err(rl[0], rl[1]["message"])
-    model = body.get("model") or "auto"
+    model = (body.get("model") or "").strip()
+    if not model:
+        # 号池 key 缺省模型按池属性走：default_model 优先，否则 auto（池内轮询；mode 为预留策略位）
+        model = (scope.get("default_model") or "auto") if scope is not None else "auto"
     is_group = False
     # 渠道隔离：限定写法解析失败显式报错；裸名多渠道 409；裸名无渠道 → 保留 Claude Code 的 auto 回退。
     # 合并组（2026-09-30）：404/无渠道时再试组名；组名不吞回 auto。
