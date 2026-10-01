@@ -59,16 +59,18 @@ _lock = threading.Lock()
 _log_ctx = contextvars.ContextVar("hub_log_ctx", default=None)
 
 
-def _set_log_ctx(hk, scope):
+def _set_log_ctx(hk, scope, req_user=""):
     """代理入口鉴权后调用：给本次请求的全部 log_call 打上 key/号池归属。
-    hk = 命中的 hub_keys 条目（主 key 直连时为 None）；scope = 号池 key 直授权时命中的号池。"""
+    hk = 命中的 hub_keys 条目（主 key 直连时为 None）；scope = 号池 key 直授权时命中的号池。
+    R68：req_user = 请求体 OpenAI user 字段（下游按用户归因，如 diary-<uid>）。"""
     if hk is not None:
         _log_ctx.set({"key_name": hk.get("name") or _key_id_of(hk),
-                      "pool_id": hk.get("pool_id") or ""})
+                      "pool_id": hk.get("pool_id") or "", "req_user": req_user})
     elif scope is not None:
-        _log_ctx.set({"key_name": "号池 key", "pool_id": scope.get("id") or ""})
+        _log_ctx.set({"key_name": "号池 key", "pool_id": scope.get("id") or "",
+                      "req_user": req_user})
     else:
-        _log_ctx.set({"key_name": "主 key", "pool_id": ""})
+        _log_ctx.set({"key_name": "主 key", "pool_id": "", "req_user": req_user})
 
 
 def log_call(entry):
@@ -2756,7 +2758,7 @@ async def hub_chat(req: Request):
     d = load_data()
     scope = _require_hub_key(d, req)
     hk = getattr(req.state, "hub_key_entry", None)
-    _set_log_ctx(hk, scope)
+    _set_log_ctx(hk, scope, str(body.get("user") or "")[:80])
     if hk is not None:
         rl = _key_quota_check(hk, body)
         if rl is not None:
@@ -2866,6 +2868,8 @@ async def hub_chat(req: Request):
                     "message": "模型 %s 不在号池「%s」范围内，已拦截。" % (model, scope.get("name")),
                     "type": "hub_pool_scope"}})
 
+    if model == "auto":
+        scoped = _rr_rotate(scoped, ("pool:" + str(scope.get("id"))) if scope is not None else "_global")
     scoped = _demote_failed(scoped)
 
     if model == "auto":
@@ -3046,6 +3050,27 @@ def _cand_mark_fail(pid, model):
 
 def _cand_mark_ok(pid, model):
     _STREAM_FAILS.pop((pid, model), None)
+
+
+# ---------------- 真·轮询游标（R68 2026-10-01 用户拍板） ----------------
+# 旧行为：auto 请求永远从候选列表第一个起步，只有失败才顺延——流量全压在第一个
+# 可用模型上直到撞限额才换人（2026-10-01 实测 10/10 全中同一模型）。
+# 现在按号池维度维护游标，每个 auto 请求把候选列表按游标旋转、依次从不同模型
+# 起步，把负载均匀摊到整个号池：单模型的并发与 RPM 压力降到约 1/N，
+# 不容易触发上游死限额，用户体验更稳。
+_RR_LOCK = threading.Lock()
+_RR_CTR = {}
+
+
+def _rr_rotate(scoped, key):
+    """候选列表按 scope 维度游标旋转（<2 个候选不转），返回新列表。"""
+    if len(scoped) < 2:
+        return scoped
+    with _RR_LOCK:
+        n = _RR_CTR.get(key, 0)
+        _RR_CTR[key] = (n + 1) % 1000000
+    k = n % len(scoped)
+    return scoped[k:] + scoped[:k]
 
 
 def _demote_failed(scoped):
